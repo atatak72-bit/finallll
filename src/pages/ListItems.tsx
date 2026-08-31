@@ -369,7 +369,7 @@ export default function ListItems() {
       // Normalize price safely
       const rawPrice = Number(fetched?.price ?? fetched?.amazon_price ?? fetched?.suggestedPrice ?? 0)
       const calcPrice = pricingEnabled && pricingTiers.length > 0
-        ? (calculateEbayPrice(rawPrice, pricingTiers, ebayFeePct, ebayFixedFee)?.finalPrice ?? rawPrice)
+        ? (calculateEbayPrice(rawPrice, pricingTiers, ebayFeePct, ebayFixedFee, pricingEnabled)?.finalPrice ?? rawPrice)
         : Number(fetched?.suggestedPrice ?? rawPrice)
 
       setProduct(fetched)
@@ -939,7 +939,7 @@ const handlePublish = async () => {
                 <div>
                   <label className="label">Store</label>
                   <select className="input max-w-sm" value={bulkStore?.id || ''} onChange={e => setBulkStoreId(e.target.value)}>
-                    {stores.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    {stores.map(s => <option key={s.id} value={s.id}>{s.nickname}</option>)}
                   </select>
                 </div>
               )}
