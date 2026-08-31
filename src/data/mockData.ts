@@ -101,6 +101,7 @@ export const orders: Order[] = Array.from({ length: 32 }, (_, i) => {
   const hasTracking = status === 'shipped' || status === 'delivered'
   return {
     id: `o${i + 1}`,
+    storeId: listing.storeId,
     orderId: `ORD-${200000 + i}`,
     buyerName: buyerNames[i % buyerNames.length],
     buyerUsername: buyerNames[i % buyerNames.length].toLowerCase().replace(' ', '_'),
