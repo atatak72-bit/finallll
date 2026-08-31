@@ -156,6 +156,7 @@ function mapListingRow(l: ListingRow): Listing {
 function mapOrderRow(o: OrderRow): Order {
   return {
     id: o.id,
+    storeId: o.store_id,
     orderId: o.order_id || '',
     buyerName: o.buyer_name || '',
     buyerUsername: o.buyer_username || '',
@@ -654,108 +655,3 @@ export function useData(): DataContextValue {
       body: JSON.stringify({ storeId, listingId, sku, route: 'end-listing' }),
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to end listing on eBay')
-    setListings(prev => prev.filter(l => l.id !== listingId))
-    await refresh()
-  }, [refresh])
-
-  // Removes a listing from local tracking ONLY — never calls eBay. Use this when the eBay
-  // side is unreachable/broken (bad token, deleted account, etc.) but the person still wants
-  // this row gone from the app. The real eBay listing, if any, stays untouched.
-  const removeListingLocal = useCallback(async (listingId: string) => {
-    const { error } = await supabase.from('listings').delete().eq('id', listingId)
-    if (error) throw new Error(error.message)
-    setListings(prev => prev.filter(l => l.id !== listingId))
-  }, [])
-
-  // Pulls in every listing already live on eBay for this store, regardless of how it was
-  // created — used for the initial import when connecting a real seller account that already
-  // has products, and re-runnable any time from the Listings page.
-  const syncAllEbayListings = useCallback(async (storeId: string) => {
-    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify({ storeId, route: 'sync-all-listings' }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; synced?: number; failed?: number; totalFound?: number; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to sync listings from eBay')
-    await refresh()
-    return { synced: data.synced || 0, failed: data.failed || 0, totalFound: data.totalFound || 0 }
-  }, [refresh])
-
-  const updateListing = useCallback(async (storeId: string, payload: UpdateListingPayload) => {
-    const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/update-listing`
-    const res = await fetch(syncUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify({ storeId, ...payload, route: 'update-listing' }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update listing on eBay')
-    await refresh()
-  }, [refresh])
-
-  // Handle eBay OAuth redirect — runs on every page load, not just when modal is open
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const code = params.get('code')
-    const oauthErrorParam = params.get('error_description') || params.get('error')
-
-    if (code) {
-      const processed = sessionStorage.getItem('ebay_oauth_processed')
-      if (processed === code) return
-
-      sessionStorage.setItem('ebay_oauth_processed', code)
-      window.history.replaceState({}, document.title, window.location.pathname)
-
-      const nickname = sessionStorage.getItem('ebay_store_nickname') || 'My Store'
-      setOauthProcessing(true)
-      setOauthError(null)
-
-      void (async () => {
-        try {
-          const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-oauth/callback`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ code, storeNickname: nickname }),
-          })
-          const data = await res.json() as { success?: boolean; store?: { id: string }; error?: string }
-          if (!res.ok || !data.success || !data.store?.id) {
-            throw new Error(data.error || 'Failed to connect store')
-          }
-          sessionStorage.removeItem('ebay_store_nickname')
-          await refresh()
-
-          // One-time initial import: pull in every listing already live on this eBay
-          // account (regardless of how it was created), so nothing is missing on connect.
-          // Best-effort — a failure here shouldn't block the store from being connected.
-          void fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ storeId: data.store!.id, route: 'sync-all-listings' }),
-          }).then(() => refresh()).catch(() => {})
-        } catch (err) {
-          sessionStorage.removeItem('ebay_oauth_processed')
-          setOauthError(err instanceof Error ? err.message : 'Failed to connect store')
-        } finally {
-          setOauthProcessing(false)
-        }
-      })()
-    } else if (oauthErrorParam) {
-      setOauthError(oauthErrorParam)
-      window.history.replaceState({}, document.title, window.location.pathname)
-    }
-  }, [refresh])
-
-  useEffect(() => {
-    refresh()
-  }, [refresh])
-
-  return { stores, listings, orders, conversations, revisions, loading, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings }
-}
