@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
+import { buildTemplateDescription } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -468,7 +469,12 @@ export function useData(): DataContextValue {
         const price = product.suggestedPrice
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
-        let description = product.description
+        let description = buildTemplateDescription({
+          title: product.title,
+          bulletPoints: product.bulletPoints,
+          description: product.description,
+          images: product.images,
+        })
 
         // AI Titles: only regenerate the title when the person didn't set a custom one for
         // this item — a custom title is an explicit override and should win either way.
