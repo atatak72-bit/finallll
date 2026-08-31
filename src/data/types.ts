@@ -26,6 +26,7 @@ export interface Listing {
 
 export interface Order {
   id: string
+  storeId: string
   orderId: string
   buyerName: string
   buyerUsername: string
