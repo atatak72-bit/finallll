@@ -75,14 +75,29 @@ export function stripHtml(html: string): string {
   }
 }
 
-// Routes an Amazon CDN image URL through our own Supabase edge function so the URL a buyer
-// (or anyone viewing image source) sees is our own domain, not m.media-amazon.com — the
-// listing never visibly reveals it was sourced from Amazon.
-export function proxyImageUrl(url: string): string {
-  if (!url) return url
+// Sends a batch of real Amazon image URLs to the `img` edge function and gets back opaque
+// tokens in the same order — used to build <img> URLs that reveal nothing about the source.
+// Any URL that fails to register (bad host, network error) becomes an empty string, filtered
+// out by the caller.
+export async function proxyImageUrls(urls: string[]): Promise<string[]> {
+  if (!urls.length) return []
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
-  if (!supabaseUrl) return url
-  return `${supabaseUrl}/functions/v1/amazon-image-proxy?url=${encodeURIComponent(url)}`
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
+  if (!supabaseUrl) return urls
+
+  try {
+    const res = await fetch(`${supabaseUrl}/functions/v1/img`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+      body: JSON.stringify({ urls }),
+    })
+    const data = await res.json().catch(() => ({})) as { success?: boolean; ids?: (string | null)[] }
+    if (!res.ok || !data.success || !data.ids) return urls
+    return data.ids.map(id => id ? `${supabaseUrl}/functions/v1/img?id=${id}` : '').filter(Boolean)
+  } catch {
+    // If the proxy call itself fails, fall back to the original URLs rather than losing images.
+    return urls
+  }
 }
 
 // Builds a polished, branded HTML listing description (banner, trust badges, key features,
