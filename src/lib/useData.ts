@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrl } from './utils'
+import { buildTemplateDescription, proxyImageUrls } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -368,15 +368,15 @@ export function useData(): DataContextValue {
     if (!res.ok || !data.success || !data.product) {
       throw new Error(data.error || 'Amazon product could not be fetched')
     }
-    // Route every image through our own proxy right here, at the single point all Amazon
-    // product data enters the app. Every downstream consumer (thumbnails, description
-    // template, the images sent to eBay) then automatically gets a URL that never reveals
-    // it came from Amazon — no need to remember to do this in each individual screen.
-    const proxiedImages = (data.product.images || []).map(proxyImageUrl)
+    // Route every image through our own opaque-token proxy right here, at the single point
+    // all Amazon product data enters the app. Every downstream consumer (thumbnails, the
+    // description template, the images sent to eBay) then automatically gets a URL that
+    // reveals nothing about the source — not even as an encoded parameter.
+    const proxiedImages = await proxyImageUrls(data.product.images || [])
     return {
       ...data.product,
       images: proxiedImages,
-      mainImage: data.product.mainImage ? proxyImageUrl(data.product.mainImage) : (proxiedImages[0] || ''),
+      mainImage: proxiedImages[0] || '',
     }
   }, [])
 
