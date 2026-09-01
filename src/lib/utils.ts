@@ -86,14 +86,17 @@ export async function proxyImageUrls(urls: string[]): Promise<string[]> {
   if (!supabaseUrl) return urls
 
   try {
-    const res = await fetch(`${supabaseUrl}/functions/v1/img`, {
+    // Note: this function is deployed under the slug "smart-worker" in Supabase (auto-assigned
+    // by the function editor, distinct from its display name "img") — this must match that
+    // exact route or every call 404s.
+    const res = await fetch(`${supabaseUrl}/functions/v1/smart-worker`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
       body: JSON.stringify({ urls }),
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; ids?: (string | null)[] }
     if (!res.ok || !data.success || !data.ids) return urls
-    return data.ids.map(id => id ? `${supabaseUrl}/functions/v1/img?id=${id}` : '').filter(Boolean)
+    return data.ids.map(id => id ? `${supabaseUrl}/functions/v1/smart-worker?id=${id}` : '').filter(Boolean)
   } catch {
     // If the proxy call itself fails, fall back to the original URLs rather than losing images.
     return urls
