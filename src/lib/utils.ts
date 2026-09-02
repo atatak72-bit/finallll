@@ -103,10 +103,11 @@ export async function proxyImageUrls(urls: string[]): Promise<string[]> {
   }
 }
 
-// Builds a polished, branded HTML listing description (banner, trust badges, key features,
-// description, image, and About/Shipping/Returns/Satisfaction sections) from raw Amazon
-// product data. Used by both the Single Add and Bulk Add flows so every listing gets the
-// same professional look without the seller having to design it by hand each time.
+// Builds a polished, distinctly-branded HTML listing description (header bar with store
+// name, trust badge strip, key features checklist, image gallery, description, and a
+// card-style footer with About/Shipping/Returns/Satisfaction) from raw Amazon product data.
+// Used by both the Single Add and Bulk Add flows so every listing gets the same
+// professional look without the seller having to design it by hand each time.
 export function buildTemplateDescription(product: {
   title?: string
   bulletPoints?: string[]
@@ -117,42 +118,111 @@ export function buildTemplateDescription(product: {
   const bullets = (product?.bulletPoints || []).map(b => stripHtml(String(b))).filter(Boolean)
   const description = stripHtml(product?.description || '').trim()
   // Images arrive here already proxied (see fetchAmazonProduct in useData.ts) — use as-is.
-  const mainImage = product?.images?.[0] || ''
+  const images = (product?.images || []).filter(Boolean)
+  const mainImage = images[0] || ''
+  const galleryImages = images.slice(1, 5)
 
-  const bulletsHtml = bullets.length
-    ? `<ul style="margin:0;padding-left:18px;line-height:1.6;">${bullets.map(b => `<li>${b}</li>`).join('')}</ul>`
+  const featuresHtml = bullets.length
+    ? bullets.map(b => `
+        <tr>
+          <td width="24" style="vertical-align:top;padding:4px 8px 4px 0;">
+            <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#0f766e;text-align:center;line-height:16px;color:#fff;font-size:11px;font-weight:bold;">&#10003;</span>
+          </td>
+          <td style="vertical-align:top;padding:4px 0;font-size:13px;line-height:1.6;color:#334155;">${b}</td>
+        </tr>`).join('')
     : ''
 
-  return `<div style="max-width:800px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#222;border:1px solid #e2e2e2;border-radius:6px;overflow:hidden;">
-  <div style="background:linear-gradient(135deg,#1e3c72,#2a5298);padding:24px;text-align:center;color:#fff;">
-    <div style="font-size:22px;font-weight:bold;letter-spacing:1px;">PREMIUM QUALITY &amp; FAST SHIPPING</div>
-    <div style="font-size:13px;opacity:.85;margin-top:4px;">Dedicated Customer Support</div>
+  const galleryHtml = galleryImages.length
+    ? `<table width="100%" cellpadding="0" cellspacing="0"><tr>
+        ${galleryImages.map(img => `
+          <td style="padding:4px;width:${Math.floor(100 / galleryImages.length)}%;">
+            <img src="${img}" alt="${title}" style="width:100%;display:block;border-radius:8px;border:1px solid #e2e8f0;" />
+          </td>`).join('')}
+      </tr></table>`
+    : ''
+
+  return `<div style="max-width:820px;margin:0 auto;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;">
+
+  <!-- Header bar -->
+  <div style="background:#0f172a;padding:16px 24px;">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="vertical-align:middle;">
+        <span style="font-size:14px;color:#5eead4;margin-right:6px;">&#9733;</span>
+        <span style="font-size:13px;font-weight:700;color:#ffffff;letter-spacing:1px;text-transform:uppercase;">Trusted Seller</span>
+      </td>
+      <td style="text-align:right;vertical-align:middle;">
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</span>
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</span>
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</span>
+      </td>
+    </tr></table>
   </div>
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f8;"><tr>
-    <td style="text-align:center;padding:14px 6px;font-size:12px;">🚚<br><b>Fast Shipping</b><br>On All Items</td>
-    <td style="text-align:center;padding:14px 6px;font-size:12px;">↩️<br><b>30-Day Free Returns</b><br>Hassle-Free</td>
-    <td style="text-align:center;padding:14px 6px;font-size:12px;">💬<br><b>Customer Support</b><br>Excellent Service</td>
-    <td style="text-align:center;padding:14px 6px;font-size:12px;">✅<br><b>100% Satisfaction</b><br>Guaranteed</td>
-  </tr></table>
-  <table width="100%" cellpadding="0" cellspacing="0" style="padding:20px;"><tr>
-    <td style="vertical-align:top;width:60%;padding:0 16px 0 20px;">
-      <h2 style="font-size:18px;color:#1e3c72;margin:0 0 10px;">${title}</h2>
-      ${bullets.length ? `<h3 style="font-size:14px;color:#1e3c72;margin:0 0 6px;">Key Features</h3>${bulletsHtml}` : ''}
-      ${description ? `<h3 style="font-size:14px;color:#1e3c72;margin:14px 0 6px;">Description</h3><p style="line-height:1.6;font-size:13px;">${description}</p>` : ''}
+
+  <!-- Accent strip -->
+  <div style="height:4px;background:linear-gradient(90deg,#0f766e,#14b8a6,#5eead4);"></div>
+
+  <!-- Trust badges -->
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-bottom:1px solid #e2e8f0;"><tr>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;">
+      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>1-2 business days
     </td>
-    <td style="vertical-align:top;width:40%;text-align:center;padding-right:20px;">
-      ${mainImage ? `<img src="${mainImage}" alt="${title}" style="max-width:100%;border-radius:8px;border:1px solid #e2e2e2;" />` : ''}
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#8635;</div><b style="color:#0f172a;">30-Day Returns</b><br>No hassle
+    </td>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#128172;</div><b style="color:#0f172a;">Real Support</b><br>Fast responses
+    </td>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#9989;</div><b style="color:#0f172a;">Guaranteed</b><br>100% satisfaction
     </td>
   </tr></table>
-  <div>
-    <div style="background:#1e3c72;color:#fff;padding:10px 20px;font-weight:bold;font-size:13px;">ABOUT US</div>
-    <div style="padding:10px 20px;font-size:12px;background:#fafafa;line-height:1.6;">We are committed to providing quality products and a great shopping experience. Our goal is to earn your trust with every order.</div>
-    <div style="background:#1e3c72;color:#fff;padding:10px 20px;font-weight:bold;font-size:13px;">SHIPPING</div>
-    <div style="padding:10px 20px;font-size:12px;background:#fafafa;line-height:1.6;">We work hard to get every order to you as quickly as possible. Orders are shipped within 1-2 business days.</div>
-    <div style="background:#1e3c72;color:#fff;padding:10px 20px;font-weight:bold;font-size:13px;">RETURNS</div>
-    <div style="padding:10px 20px;font-size:12px;background:#fafafa;line-height:1.6;">We offer a 30-day return policy. If you're not fully satisfied, contact us and we'll make it right.</div>
-    <div style="background:#1e3c72;color:#fff;padding:10px 20px;font-weight:bold;font-size:13px;">CUSTOMER SATISFACTION</div>
-    <div style="padding:10px 20px;font-size:12px;background:#fafafa;line-height:1.6;">Your satisfaction is our top priority. We want every customer to have a great experience from start to finish.</div>
-  </div>
+
+  <!-- Main content -->
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:24px;"><tr>
+    <td style="vertical-align:top;width:58%;padding-right:20px;">
+      <h2 style="font-size:19px;color:#0f172a;margin:0 0 14px;line-height:1.35;">${title}</h2>
+      ${featuresHtml ? `
+        <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px;">Key Features</div>
+        <table cellpadding="0" cellspacing="0">${featuresHtml}</table>
+      ` : ''}
+      ${description ? `
+        <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin:18px 0 8px;">Description</div>
+        <p style="line-height:1.7;font-size:13px;color:#334155;margin:0;">${description}</p>
+      ` : ''}
+    </td>
+    <td style="vertical-align:top;width:42%;">
+      ${mainImage ? `<img src="${mainImage}" alt="${title}" style="width:100%;border-radius:10px;border:1px solid #e2e8f0;display:block;margin-bottom:8px;" />` : ''}
+      ${galleryHtml}
+    </td>
+  </tr></table>
+
+  <!-- Footer info cards -->
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:20px;border-top:1px solid #e2e8f0;"><tr>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#127970; About Us</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">We're committed to quality products and a great shopping experience — our goal is to earn your trust with every order.</div>
+      </div>
+    </td>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#128230; Shipping</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">Orders ship within 1-2 business days. We work hard to get every order to you as quickly as possible.</div>
+      </div>
+    </td>
+  </tr><tr>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#8635; Returns</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">30-day return policy. Not fully satisfied? Contact us and we'll make it right.</div>
+      </div>
+    </td>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#9989; Satisfaction</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">Your satisfaction is our top priority — every customer deserves a great experience start to finish.</div>
+      </div>
+    </td>
+  </tr></table>
 </div>`
 }
