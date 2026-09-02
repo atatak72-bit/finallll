@@ -1,8 +1,9 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Search, Filter, Edit2, Trash2, Pencil, CheckSquare,
   Square, ArrowUpDown, Tag, ShoppingBag, AlertCircle, Loader2, ChevronDown,
+  ChevronLeft, ChevronRight,
 } from 'lucide-react'
 import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
@@ -10,6 +11,8 @@ import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import { formatCurrency, formatDate, cn } from '../lib/utils'
 import type { ListingStatus } from '../data/types'
+
+const PAGE_SIZE = 100
 
 export default function Listings() {
   const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings } = useStoreData()
@@ -41,6 +44,7 @@ export default function Listings() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false)
+  const [page, setPage] = useState(1)
 
   const filtered = useMemo(() => {
     let result = listings.filter(l => {
@@ -59,7 +63,20 @@ export default function Listings() {
     return result
   }, [listings, search, statusFilter, sortField, sortDir])
 
-  const allSelected = filtered.length > 0 && selected.length === filtered.length
+  // Reset to page 1 whenever the search or filter changes the result set —
+  // otherwise you could land on an empty "page 3" after narrowing a search.
+  useEffect(() => {
+    setPage(1)
+  }, [search, statusFilter, sortField, sortDir])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const paged = useMemo(
+    () => filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [filtered, currentPage],
+  )
+
+  const allSelected = paged.length > 0 && paged.every(l => selected.includes(l.id))
 
   function toggleSort(field: typeof sortField) {
     if (sortField === field) {
@@ -75,7 +92,11 @@ export default function Listings() {
   }
 
   function toggleSelectAll() {
-    setSelected(allSelected ? [] : filtered.map(l => l.id))
+    if (allSelected) {
+      setSelected(prev => prev.filter(id => !paged.some(l => l.id === id)))
+    } else {
+      setSelected(prev => Array.from(new Set([...prev, ...paged.map(l => l.id)])))
+    }
   }
 
   async function handleDeleteOne(listing: typeof listings[number], mode: 'ebay' | 'local') {
@@ -323,7 +344,7 @@ export default function Listings() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(listing => (
+                {paged.map(listing => (
                   <tr key={listing.id} className="border-b border-slate-100 table-row-hover">
                     <td className="px-4 py-3">
                       <button onClick={() => toggleSelect(listing.id)}>
@@ -388,11 +409,26 @@ export default function Listings() {
             </table>
           </div>
         )}
-        <div className="px-4 py-3 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between">
-          <span>Showing {filtered.length} of {listings.length} listings</span>
-          <div className="flex gap-1">
-            <button className="btn-ghost text-xs px-2 py-1" disabled>Previous</button>
-            <button className="btn-ghost text-xs px-2 py-1" disabled>Next</button>
+        <div className="px-4 py-3 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between flex-wrap gap-2">
+          <span>
+            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} of {filtered.length} listings
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-ghost text-xs px-2 py-1 flex items-center gap-1 disabled:opacity-40"
+              disabled={currentPage <= 1}
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+            >
+              <ChevronLeft className="w-3.5 h-3.5" /> Previous
+            </button>
+            <span className="text-slate-400">Page {currentPage} of {totalPages}</span>
+            <button
+              className="btn-ghost text-xs px-2 py-1 flex items-center gap-1 disabled:opacity-40"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            >
+              Next <ChevronRight className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
       </div>
