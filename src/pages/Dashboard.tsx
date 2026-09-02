@@ -15,7 +15,6 @@ export default function Dashboard() {
   const [connectOpen, setConnectOpen] = useState(false)
   const [trendMetric, setTrendMetric] = useState<'profit' | 'revenue' | 'orders'>('profit')
 
-  // Trend chart: last 7 days of profit/revenue/orders, grouped by day
   const trendData = useMemo(() => {
     const days: { key: string; label: string; profit: number; revenue: number; orders: number }[] = []
     for (let i = 6; i >= 0; i--) {
@@ -61,7 +60,6 @@ export default function Dashboard() {
   const fulfillmentRate = totalOrders > 0 ? Math.round((orders.filter(o => o.status === 'delivered' || o.status === 'shipped').length / totalOrders) * 100) : 0
   const promotedRate = listings.length > 0 ? Math.round((listings.filter(l => l.promoted).length / listings.length) * 100) : 0
 
-  // Per-store breakdown for the currently active store (mirrors the account-wide stats above, scoped to one store)
   const activeStore = stores.find(s => s.active) || stores[0]
   const storeListings = listings.filter(l => l.storeId === activeStore?.id)
   const storeOrders = orders.filter(o => o.storeId === activeStore?.id)
@@ -89,20 +87,40 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Estimated Profit" value={formatCurrency(totalProfit)} icon={DollarSign} trend="last 30 days" color="success" />
-        <StatCard label="Total Orders (30d)" value={String(totalOrders)} icon={ShoppingBag} trend={`${pendingOrders} pending shipment`} color="warning" />
-        <StatCard label="Total Listings" value={String(totalListings)} icon={Package} trend="across all stores" color="brand" />
-        <StatCard label="Connected Stores" value={`${connectedStores}/${stores.length}`} icon={Store} trend="eBay stores linked" color="brand" />
-      </div>
-
-      {/* Listing status + units-sold breakdown */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Active Listings" value={String(activeListings)} icon={CheckCircle2} trend="currently live on eBay" color="success" />
-        <StatCard label="Out of Stock" value={String(outOfStockListings)} icon={PackageX} trend="paused, source out of stock" color="warning" />
-        <StatCard label="Unknown Listings" value={String(unknownListings)} icon={HelpCircle} trend="not yet linked to an ASIN" color="brand" />
-        <StatCard label="Total Units Sold" value={String(totalUnitsSold)} icon={TrendingUp} trend="all-time, across all stores" color="success" />
+      {/* Store management — moved to the top so the connected store's real name is immediately visible */}
+      <div className="card">
+        <div className="card-header flex items-center justify-between">
+          <h3 className="font-semibold text-slate-900">Stores Management</h3>
+          <Link to="/settings" className="text-sm text-brand-600 hover:text-brand-700 font-medium">Manage</Link>
+        </div>
+        <div className="card-body">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {stores.filter(store => store.connected).map(store => (
+              <div key={store.id} className="flex items-center gap-3 p-4 rounded-xl border border-slate-200 hover:bg-slate-50 transition">
+                <div className="w-10 h-10 rounded-lg bg-brand-50 flex items-center justify-center shrink-0">
+                  <Store className="w-5 h-5 text-brand-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-slate-900 text-sm">{store.ebayUsername || store.nickname}</span>
+                    {store.active && <span className="badge-info">Active</span>}
+                  </div>
+                  <p className="text-xs text-slate-500 truncate">{store.ebayUsername}</p>
+                </div>
+                <span className="badge-success shrink-0"><CheckCircle2 className="w-3 h-3" /> Connected</span>
+              </div>
+            ))}
+            <button
+              onClick={() => setConnectOpen(true)}
+              className="group flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-brand-300 bg-brand-50/50 hover:bg-brand-50 hover:border-brand-500 transition-all duration-200 min-h-[88px]"
+            >
+              <span className="w-9 h-9 rounded-full border-2 border-brand-400 group-hover:border-brand-600 flex items-center justify-center text-xl font-light text-brand-600 group-hover:text-brand-700 transition-colors leading-none">
+                +
+              </span>
+              <span className="text-sm font-semibold text-brand-700 group-hover:text-brand-800">Add store</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       {oauthProcessing && (
@@ -129,75 +147,53 @@ export default function Dashboard() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Store management */}
-        <div className="card lg:col-span-2">
-          <div className="card-header flex items-center justify-between">
-            <h3 className="font-semibold text-slate-900">Stores Management</h3>
-            <Link to="/settings" className="text-sm text-brand-600 hover:text-brand-700 font-medium">Manage</Link>
-          </div>
-          <div className="card-body">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {stores.filter(store => store.connected).map(store => (
-                <div key={store.id} className="flex items-center gap-3 p-4 rounded-xl border border-slate-200 hover:bg-slate-50 transition">
-                  <div className="w-10 h-10 rounded-lg bg-brand-50 flex items-center justify-center shrink-0">
-                    <Store className="w-5 h-5 text-brand-600" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-slate-900 text-sm">{store.nickname}</span>
-                      {store.active && <span className="badge-info">Active</span>}
-                    </div>
-                    <p className="text-xs text-slate-500 truncate">{store.ebayUsername}</p>
-                  </div>
-                  <span className="badge-success shrink-0"><CheckCircle2 className="w-3 h-3" /> Connected</span>
-                </div>
-              ))}
-              <button
-                onClick={() => setConnectOpen(true)}
-                className="group flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-brand-300 bg-brand-50/50 hover:bg-brand-50 hover:border-brand-500 transition-all duration-200 min-h-[88px]"
-              >
-                <span className="w-9 h-9 rounded-full border-2 border-brand-400 group-hover:border-brand-600 flex items-center justify-center text-xl font-light text-brand-600 group-hover:text-brand-700 transition-colors leading-none">
-                  +
-                </span>
-                <span className="text-sm font-semibold text-brand-700 group-hover:text-brand-800">Add store</span>
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* Stat cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard label="Estimated Profit" value={formatCurrency(totalProfit)} icon={DollarSign} trend="last 30 days" color="success" />
+        <StatCard label="Total Orders (30d)" value={String(totalOrders)} icon={ShoppingBag} trend={`${pendingOrders} pending shipment`} color="warning" />
+        <StatCard label="Total Listings" value={String(totalListings)} icon={Package} trend="across all stores" color="brand" />
+        <StatCard label="Connected Stores" value={`${connectedStores}/${stores.length}`} icon={Store} trend="eBay stores linked" color="brand" />
+      </div>
 
-        {/* Account performance */}
-        <div className="card">
-          <div className="card-header">
-            <h3 className="font-semibold text-slate-900">Account Performance</h3>
+      {/* Listing status + units-sold breakdown */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard label="Active Listings" value={String(activeListings)} icon={CheckCircle2} trend="currently live on eBay" color="success" />
+        <StatCard label="Out of Stock" value={String(outOfStockListings)} icon={PackageX} trend="paused, source out of stock" color="warning" />
+        <StatCard label="Unknown Listings" value={String(unknownListings)} icon={HelpCircle} trend="not yet linked to an ASIN" color="brand" />
+        <StatCard label="Total Units Sold" value={String(totalUnitsSold)} icon={TrendingUp} trend="all-time, across all stores" color="success" />
+      </div>
+
+      {/* Account performance */}
+      <div className="card">
+        <div className="card-header">
+          <h3 className="font-semibold text-slate-900">Account Performance</h3>
+        </div>
+        <div className="card-body space-y-4">
+          <div>
+            <div className="flex items-center justify-between text-sm mb-1">
+              <span className="text-slate-600">Listings sold this month</span>
+              <span className="font-semibold text-slate-900">{soldListings}</span>
+            </div>
+            <div className="w-full h-2 bg-slate-100 rounded-full">
+              <div className="h-full bg-success-500 rounded-full" style={{ width: `${soldListings > 0 ? Math.min(soldListings, 100) : 0}%` }} />
+            </div>
           </div>
-          <div className="card-body space-y-4">
-            <div>
-              <div className="flex items-center justify-between text-sm mb-1">
-                <span className="text-slate-600">Listings sold this month</span>
-                <span className="font-semibold text-slate-900">{soldListings}</span>
-              </div>
-              <div className="w-full h-2 bg-slate-100 rounded-full">
-                <div className="h-full bg-success-500 rounded-full" style={{ width: `${soldListings > 0 ? Math.min(soldListings, 100) : 0}%` }} />
-              </div>
+          <div>
+            <div className="flex items-center justify-between text-sm mb-1">
+              <span className="text-slate-600">Order fulfillment rate</span>
+              <span className="font-semibold text-slate-900">{fulfillmentRate}%</span>
             </div>
-            <div>
-              <div className="flex items-center justify-between text-sm mb-1">
-                <span className="text-slate-600">Order fulfillment rate</span>
-                <span className="font-semibold text-slate-900">{fulfillmentRate}%</span>
-              </div>
-              <div className="w-full h-2 bg-slate-100 rounded-full">
-                <div className="h-full bg-brand-500 rounded-full" style={{ width: `${fulfillmentRate}%` }} />
-              </div>
+            <div className="w-full h-2 bg-slate-100 rounded-full">
+              <div className="h-full bg-brand-500 rounded-full" style={{ width: `${fulfillmentRate}%` }} />
             </div>
-            <div>
-              <div className="flex items-center justify-between text-sm mb-1">
-                <span className="text-slate-600">Promoted listings rate</span>
-                <span className="font-semibold text-slate-900">{promotedRate}%</span>
-              </div>
-              <div className="w-full h-2 bg-slate-100 rounded-full">
-                <div className="h-full bg-accent-500 rounded-full" style={{ width: `${listings.length > 0 ? (listings.filter(l => l.promoted).length / listings.length) * 100 : 0}%` }} />
-              </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-sm mb-1">
+              <span className="text-slate-600">Promoted listings rate</span>
+              <span className="font-semibold text-slate-900">{promotedRate}%</span>
+            </div>
+            <div className="w-full h-2 bg-slate-100 rounded-full">
+              <div className="h-full bg-accent-500 rounded-full" style={{ width: `${listings.length > 0 ? (listings.filter(l => l.promoted).length / listings.length) * 100 : 0}%` }} />
             </div>
           </div>
         </div>
@@ -207,7 +203,7 @@ export default function Dashboard() {
       {activeStore && (
         <div className="card">
           <div className="card-header">
-            <h3 className="font-semibold text-slate-900">Store performance — {activeStore.nickname}</h3>
+            <h3 className="font-semibold text-slate-900">Store performance — {activeStore.ebayUsername || activeStore.nickname}</h3>
             <p className="text-xs text-slate-500 mt-0.5">Same metrics as above, filtered to this one store.</p>
           </div>
           <div className="card-body">
