@@ -1,10 +1,10 @@
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import {
-  Search, Filter, Edit2, Trash2, Pencil, CheckSquare,
+  Search, Filter, Edit2, Pencil, CheckSquare,
   Square, ArrowUpDown, Tag, ShoppingBag, AlertCircle, Loader2, ChevronDown,
-  ChevronLeft, ChevronRight,
+  ChevronLeft, ChevronRight, MoreVertical, XCircle, Unlink2, Trash2,
 } from 'lucide-react'
 import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
@@ -22,8 +22,8 @@ function markupPct(ebayPrice: number, amazonPrice: number): string | null {
   return `${sign}${pct.toFixed(0)}%`
 }
 
-// Renders a small action menu anchored to a trigger button, but drawn via a portal at a
-// fixed screen position — this sidesteps a real browser quirk where position:absolute
+// Renders a small, polished action menu anchored to a trigger button, drawn via a portal
+// at a fixed screen position — this avoids a real browser quirk where position:absolute
 // dropdowns inside a <table> cell get clipped/misplaced by the table's own layout box.
 function ActionMenu({
   anchorRect,
@@ -32,30 +32,35 @@ function ActionMenu({
 }: {
   anchorRect: DOMRect
   onClose: () => void
-  items: Array<{ label: string; description?: string; onClick: () => void; danger?: boolean }>
+  items: Array<{ label: string; description?: string; onClick: () => void; danger?: boolean; icon: React.ComponentType<{ className?: string }> }>
 }) {
-  const menuWidth = 256
-  const top = anchorRect.bottom + 6
+  const menuWidth = 280
+  const top = anchorRect.bottom + 8
   const left = Math.min(anchorRect.right - menuWidth, window.innerWidth - menuWidth - 8)
 
   return createPortal(
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="fixed z-50 w-64 bg-white rounded-lg border border-slate-200 shadow-lg py-1"
-        style={{ top, left: Math.max(left, 8) }}
+        className="fixed z-50 bg-white rounded-xl border border-slate-200 shadow-xl py-1.5"
+        style={{ top, left: Math.max(left, 8), width: menuWidth }}
       >
         {items.map((item, idx) => (
           <button
             key={idx}
             onClick={() => { item.onClick(); onClose() }}
-            className={cn(
-              'w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex flex-col',
-              item.danger ? 'text-error-600' : 'text-slate-700',
-            )}
+            className="w-full text-left px-3 py-2.5 flex items-start gap-3 hover:bg-slate-50 transition-colors"
           >
-            <span className="font-medium">{item.label}</span>
-            {item.description && <span className="text-xs text-slate-400">{item.description}</span>}
+            <span className={cn(
+              'w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5',
+              item.danger ? 'bg-error-50 text-error-600' : 'bg-slate-100 text-slate-500',
+            )}>
+              <item.icon className="w-4 h-4" />
+            </span>
+            <span className="flex flex-col">
+              <span className={cn('text-sm font-medium', item.danger ? 'text-error-700' : 'text-slate-800')}>{item.label}</span>
+              {item.description && <span className="text-xs text-slate-400 mt-0.5 leading-snug">{item.description}</span>}
+            </span>
           </button>
         ))}
       </div>
@@ -441,9 +446,9 @@ export default function Listings() {
                             setOpenMenuId(openMenuId === listing.id ? null : listing.id)
                           }}
                           disabled={deletingId === listing.id}
-                          className="p-1.5 rounded-lg hover:bg-error-50 text-slate-500 hover:text-error-600 transition disabled:opacity-50"
+                          className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition disabled:opacity-50"
                         >
-                          {deletingId === listing.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                          {deletingId === listing.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <MoreVertical className="w-4 h-4" />}
                         </button>
                       </div>
                     </td>
@@ -490,11 +495,14 @@ export default function Listings() {
                 label: 'End on eBay',
                 description: 'Ends the real eBay listing, then removes it here',
                 onClick: () => void handleDeleteOne(listing, 'ebay'),
+                icon: XCircle,
+                danger: true,
               },
               {
                 label: 'Remove from automation only',
                 description: "Stops tracking here — eBay is untouched. Use if your eBay connection is broken.",
                 onClick: () => void handleDeleteOne(listing, 'local'),
+                icon: Unlink2,
               },
             ]}
           />
