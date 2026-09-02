@@ -278,6 +278,7 @@ export default function ListItems() {
   const [importResult, setImportResult] = useState<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> } | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
   const [manualFileName, setManualFileName] = useState<string | null>(null)
+  const [showManualUpload, setShowManualUpload] = useState(false)
   const manualFileInputRef = useRef<HTMLInputElement>(null)
 
   const [importMode, setImportMode] = useState<'manual' | 'csv'>('csv')
@@ -1481,17 +1482,28 @@ export default function ListItems() {
                   />
                   <button
                     type="button"
-                    onClick={() => manualFileInputRef.current?.click()}
+                    onClick={() => setShowManualUpload(v => !v)}
                     className="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"
                   >
                     <span className={cn(
                       'w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors',
-                      manualFileName ? 'bg-brand-600 border-brand-600' : 'border-slate-300 bg-white',
+                      showManualUpload ? 'bg-brand-600 border-brand-600' : 'border-slate-300 bg-white',
                     )}>
-                      {manualFileName && <CheckCircle2 className="w-3 h-3 text-white" />}
+                      {showManualUpload && <CheckCircle2 className="w-3 h-3 text-white" />}
                     </span>
-                    {manualFileName ? `Uploaded: ${manualFileName}` : 'Upload CSV file'}
+                    Upload CSV file
                   </button>
+
+                  {showManualUpload && (
+                    <button
+                      type="button"
+                      onClick={() => manualFileInputRef.current?.click()}
+                      className="w-full flex items-center justify-center text-sm text-slate-500 border-2 border-dashed border-slate-300 rounded-lg py-3 mb-3 hover:border-brand-400 hover:bg-brand-50/30 transition"
+                    >
+                      {manualFileName ? manualFileName : 'Choose File'}
+                    </button>
+                  )}
+
                   <textarea
                     rows={8}
                     className="input font-mono text-sm"
