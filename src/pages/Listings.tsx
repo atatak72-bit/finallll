@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Link } from 'react-router-dom'
 import {
   Search, Filter, Edit2, Trash2, Pencil, CheckSquare,
@@ -19,6 +20,48 @@ function markupPct(ebayPrice: number, amazonPrice: number): string | null {
   const pct = ((ebayPrice - amazonPrice) / amazonPrice) * 100
   const sign = pct >= 0 ? '+' : ''
   return `${sign}${pct.toFixed(0)}%`
+}
+
+// Renders a small action menu anchored to a trigger button, but drawn via a portal at a
+// fixed screen position — this sidesteps a real browser quirk where position:absolute
+// dropdowns inside a <table> cell get clipped/misplaced by the table's own layout box.
+function ActionMenu({
+  anchorRect,
+  onClose,
+  items,
+}: {
+  anchorRect: DOMRect
+  onClose: () => void
+  items: Array<{ label: string; description?: string; onClick: () => void; danger?: boolean }>
+}) {
+  const menuWidth = 256
+  const top = anchorRect.bottom + 6
+  const left = Math.min(anchorRect.right - menuWidth, window.innerWidth - menuWidth - 8)
+
+  return createPortal(
+    <>
+      <div className="fixed inset-0 z-40" onClick={onClose} />
+      <div
+        className="fixed z-50 w-64 bg-white rounded-lg border border-slate-200 shadow-lg py-1"
+        style={{ top, left: Math.max(left, 8) }}
+      >
+        {items.map((item, idx) => (
+          <button
+            key={idx}
+            onClick={() => { item.onClick(); onClose() }}
+            className={cn(
+              'w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex flex-col',
+              item.danger ? 'text-error-600' : 'text-slate-700',
+            )}
+          >
+            <span className="font-medium">{item.label}</span>
+            {item.description && <span className="text-xs text-slate-400">{item.description}</span>}
+          </button>
+        ))}
+      </div>
+    </>,
+    document.body,
+  )
 }
 
 export default function Listings() {
@@ -50,6 +93,7 @@ export default function Listings() {
   const [bulkRunning, setBulkRunning] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
+  const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false)
   const [page, setPage] = useState(1)
 
@@ -105,7 +149,6 @@ export default function Listings() {
   }
 
   async function handleDeleteOne(listing: typeof listings[number], mode: 'ebay' | 'local') {
-    setOpenMenuId(null)
     const confirmMsg = mode === 'ebay'
       ? `End "${listing.title}" on eBay and remove it? This cannot be undone.`
       : `Remove "${listing.title}" from this app only? The listing on eBay (if any) will stay untouched.`
@@ -387,35 +430,21 @@ export default function Listings() {
                     <td className="px-4 py-3"><StatusBadge status={listing.status} /></td>
                     <td className="px-4 py-3 text-slate-500 text-xs">{formatDate(listing.listedDate)}</td>
                     <td className="px-4 py-3">
-                      <div className="flex items-center justify-end gap-1 relative">
+                      <div className="flex items-center justify-end gap-1">
                         <Link to={`/listings/${listing.id}`} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition">
                           <Pencil className="w-4 h-4" />
                         </Link>
                         <button
-                          onClick={() => setOpenMenuId(openMenuId === listing.id ? null : listing.id)}
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect()
+                            setMenuAnchorRect(rect)
+                            setOpenMenuId(openMenuId === listing.id ? null : listing.id)
+                          }}
                           disabled={deletingId === listing.id}
                           className="p-1.5 rounded-lg hover:bg-error-50 text-slate-500 hover:text-error-600 transition disabled:opacity-50"
                         >
                           {deletingId === listing.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                         </button>
-                        {openMenuId === listing.id && (
-                          <div className="absolute right-0 top-8 w-64 bg-white rounded-lg border border-slate-200 shadow-lg z-10 py-1">
-                            <button
-                              onClick={() => void handleDeleteOne(listing, 'ebay')}
-                              className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 flex flex-col"
-                            >
-                              <span className="font-medium">End on eBay</span>
-                              <span className="text-xs text-slate-400">Ends the real eBay listing, then removes it here</span>
-                            </button>
-                            <button
-                              onClick={() => void handleDeleteOne(listing, 'local')}
-                              className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 flex flex-col"
-                            >
-                              <span className="font-medium">Remove from automation only</span>
-                              <span className="text-xs text-slate-400">Stops tracking here — eBay is untouched. Use if your eBay connection is broken.</span>
-                            </button>
-                          </div>
-                        )}
                       </div>
                     </td>
                   </tr>
@@ -448,6 +477,29 @@ export default function Listings() {
           </div>
         </div>
       </div>
+
+      {openMenuId && menuAnchorRect && (() => {
+        const listing = listings.find(l => l.id === openMenuId)
+        if (!listing) return null
+        return (
+          <ActionMenu
+            anchorRect={menuAnchorRect}
+            onClose={() => setOpenMenuId(null)}
+            items={[
+              {
+                label: 'End on eBay',
+                description: 'Ends the real eBay listing, then removes it here',
+                onClick: () => void handleDeleteOne(listing, 'ebay'),
+              },
+              {
+                label: 'Remove from automation only',
+                description: "Stops tracking here — eBay is untouched. Use if your eBay connection is broken.",
+                onClick: () => void handleDeleteOne(listing, 'local'),
+              },
+            ]}
+          />
+        )
+      })()}
     </div>
   )
 }
