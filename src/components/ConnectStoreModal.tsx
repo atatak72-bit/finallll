@@ -38,7 +38,7 @@ export function ConnectStoreModal({ open, onClose, onConnected }: {
       if (!res.ok || typeof data.authUrl !== 'string') {
         throw new Error(data.error || 'Failed to get eBay authorization URL')
       }
-      window.open(data.authUrl, '_blank')
+      window.location.href = data.authUrl
     } catch (err) {
       setStep('error')
     }
