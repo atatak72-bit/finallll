@@ -87,7 +87,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Store management — moved to the top so the connected store's real name is immediately visible */}
+      {/* Store management */}
       <div className="card">
         <div className="card-header flex items-center justify-between">
           <h3 className="font-semibold text-slate-900">Stores Management</h3>
@@ -95,6 +95,15 @@ export default function Dashboard() {
         </div>
         <div className="card-body">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            <button
+              onClick={() => setConnectOpen(true)}
+              className="group flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-brand-300 bg-brand-50/50 hover:bg-brand-50 hover:border-brand-500 transition-all duration-200 min-h-[88px]"
+            >
+              <span className="w-9 h-9 rounded-full border-2 border-brand-400 group-hover:border-brand-600 flex items-center justify-center text-xl font-light text-brand-600 group-hover:text-brand-700 transition-colors leading-none">
+                +
+              </span>
+              <span className="text-sm font-semibold text-brand-700 group-hover:text-brand-800">Add store</span>
+            </button>
             {stores.filter(store => store.connected).map(store => (
               <div key={store.id} className="flex items-center gap-3 p-4 rounded-xl border border-slate-200 hover:bg-slate-50 transition">
                 <div className="w-10 h-10 rounded-lg bg-brand-50 flex items-center justify-center shrink-0">
@@ -110,15 +119,6 @@ export default function Dashboard() {
                 <span className="badge-success shrink-0"><CheckCircle2 className="w-3 h-3" /> Connected</span>
               </div>
             ))}
-            <button
-              onClick={() => setConnectOpen(true)}
-              className="group flex flex-col items-center justify-center gap-2 p-4 rounded-xl border-2 border-dashed border-brand-300 bg-brand-50/50 hover:bg-brand-50 hover:border-brand-500 transition-all duration-200 min-h-[88px]"
-            >
-              <span className="w-9 h-9 rounded-full border-2 border-brand-400 group-hover:border-brand-600 flex items-center justify-center text-xl font-light text-brand-600 group-hover:text-brand-700 transition-colors leading-none">
-                +
-              </span>
-              <span className="text-sm font-semibold text-brand-700 group-hover:text-brand-800">Add store</span>
-            </button>
           </div>
         </div>
       </div>
