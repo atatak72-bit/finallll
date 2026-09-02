@@ -14,6 +14,13 @@ import type { ListingStatus } from '../data/types'
 
 const PAGE_SIZE = 100
 
+function markupPct(ebayPrice: number, amazonPrice: number): string | null {
+  if (!amazonPrice || amazonPrice <= 0) return null
+  const pct = ((ebayPrice - amazonPrice) / amazonPrice) * 100
+  const sign = pct >= 0 ? '+' : ''
+  return `${sign}${pct.toFixed(0)}%`
+}
+
 export default function Listings() {
   const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings } = useStoreData()
   const activeStore = stores.find(s => s.active) || stores[0]
@@ -63,8 +70,6 @@ export default function Listings() {
     return result
   }, [listings, search, statusFilter, sortField, sortDir])
 
-  // Reset to page 1 whenever the search or filter changes the result set —
-  // otherwise you could land on an empty "page 3" after narrowing a search.
   useEffect(() => {
     setPage(1)
   }, [search, statusFilter, sortField, sortDir])
@@ -323,9 +328,11 @@ export default function Listings() {
                     </button>
                   </th>
                   <th className="px-4 py-3 font-medium">ASIN</th>
+                  <th className="px-4 py-3 font-medium">Listing ID</th>
+                  <th className="px-4 py-3 font-medium text-right">Amazon</th>
                   <th className="px-4 py-3 font-medium text-right">
                     <button onClick={() => toggleSort('ebayPrice')} className="flex items-center gap-1 hover:text-slate-700 ml-auto">
-                      Price <ArrowUpDown className="w-3 h-3" />
+                      eBay <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
                   <th className="px-4 py-3 font-medium text-right">Qty</th>
@@ -344,7 +351,9 @@ export default function Listings() {
                 </tr>
               </thead>
               <tbody>
-                {paged.map(listing => (
+                {paged.map(listing => {
+                  const pct = markupPct(listing.ebayPrice, listing.amazonPrice)
+                  return (
                   <tr key={listing.id} className="border-b border-slate-100 table-row-hover">
                     <td className="px-4 py-3">
                       <button onClick={() => toggleSelect(listing.id)}>
@@ -361,11 +370,17 @@ export default function Listings() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="font-mono text-xs text-slate-500">{listing.asin}</span>
+                      <span className="font-mono text-xs text-slate-500">{listing.asin || '—'}</span>
                     </td>
+                    <td className="px-4 py-3">
+                      <span className="font-mono text-xs text-slate-500">{listing.ebayId || '—'}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(listing.amazonPrice)}</td>
                     <td className="px-4 py-3 text-right">
-                      <div className="font-medium text-slate-900">{formatCurrency(listing.ebayPrice)}</div>
-                      <div className="text-xs text-slate-400">cost {formatCurrency(listing.amazonPrice)}</div>
+                      <div className="font-medium text-slate-900">
+                        {formatCurrency(listing.ebayPrice)}
+                        {pct && <span className="ml-1 text-xs font-medium text-success-600">({pct})</span>}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right text-slate-700">{listing.quantity}</td>
                     <td className="px-4 py-3 text-right text-slate-700">{listing.soldCount}</td>
@@ -404,7 +419,8 @@ export default function Listings() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>
