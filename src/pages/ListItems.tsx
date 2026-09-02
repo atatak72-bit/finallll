@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, Fragment } from 'react'
+import { useState, useEffect, useMemo, useRef, Fragment } from 'react'
 import {
   Search, PackagePlus, Upload, Save, Link2,
   AlertCircle, CheckCircle2, Sparkles, Layers, FileText, Loader2,
@@ -277,6 +277,8 @@ export default function ListItems() {
   const [importRunning, setImportRunning] = useState(false)
   const [importResult, setImportResult] = useState<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> } | null>(null)
   const [importError, setImportError] = useState<string | null>(null)
+  const [manualFileName, setManualFileName] = useState<string | null>(null)
+  const manualFileInputRef = useRef<HTMLInputElement>(null)
 
   const [importMode, setImportMode] = useState<'manual' | 'csv'>('csv')
   const [csvRows, setCsvRows] = useState<CsvMatchRow[]>([])
@@ -669,6 +671,7 @@ export default function ListItems() {
   }
 
   const handleImportFile = (file: File) => {
+    setManualFileName(file.name)
     const reader = new FileReader()
     reader.onload = () => setImportText(String(reader.result || ''))
     reader.readAsText(file)
@@ -1469,10 +1472,26 @@ export default function ListItems() {
                 </div>
 
                 <div>
-                  <label className="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer">
-                    <input type="file" accept=".csv,.txt" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleImportFile(f) }} />
-                    <Upload className="w-4 h-4" /> Upload CSV file
-                  </label>
+                  <input
+                    ref={manualFileInputRef}
+                    type="file"
+                    accept=".csv,.txt"
+                    className="hidden"
+                    onChange={e => { const f = e.target.files?.[0]; if (f) handleImportFile(f) }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => manualFileInputRef.current?.click()}
+                    className="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"
+                  >
+                    <span className={cn(
+                      'w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors',
+                      manualFileName ? 'bg-brand-600 border-brand-600' : 'border-slate-300 bg-white',
+                    )}>
+                      {manualFileName && <CheckCircle2 className="w-3 h-3 text-white" />}
+                    </span>
+                    {manualFileName ? `Uploaded: ${manualFileName}` : 'Upload CSV file'}
+                  </button>
                   <textarea
                     rows={8}
                     className="input font-mono text-sm"
