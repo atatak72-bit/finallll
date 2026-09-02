@@ -4,7 +4,7 @@ import {
   AlertCircle, CheckCircle2, Sparkles, Layers, FileText, Loader2,
   ShieldAlert, ListChecks, Plus, Trash2, Wand2, X
 } from 'lucide-react'
-import { cn, formatCurrency, calculateEbayPrice, type PricingTierInput } from '../lib/utils'
+import { cn, formatCurrency, calculateEbayPrice, buildTemplateDescription, type PricingTierInput } from '../lib/utils'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import type { AmazonProduct } from '../lib/useData'
@@ -399,7 +399,7 @@ export default function ListItems() {
       const isOut = String(fetched?.stock ?? '').toLowerCase().includes('out')
       setQuantity(isOut ? 0 : (Number(fetched?.defaultQuantity) || 1))
 
-      const builtDesc = buildDetailedDescription(fetched)
+      const builtDesc = buildTemplateDescription(fetched)
       setReviewDescription(builtDesc)
 
       const specs = extractItemSpecifics(fetched)
