@@ -344,14 +344,12 @@ export function useData(): DataContextValue {
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
     if (!res.ok || !data.success) throw new Error(data.error || 'Unable to disconnect store')
-    // Optimistic local removal — don't wait for a full refresh.
     setStores(prev => prev.filter(s => s.id !== storeId))
     setListings([])
     setOrders([])
     setConversations([])
     setRevisions([])
     setConnected(false)
-    // Then refresh from the server to confirm the final state.
     await refresh()
   }, [refresh])
 
@@ -368,10 +366,6 @@ export function useData(): DataContextValue {
     if (!res.ok || !data.success || !data.product) {
       throw new Error(data.error || 'Amazon product could not be fetched')
     }
-    // Route every image through our own opaque-token proxy right here, at the single point
-    // all Amazon product data enters the app. Every downstream consumer (thumbnails, the
-    // description template, the images sent to eBay) then automatically gets a URL that
-    // reveals nothing about the source — not even as an encoded parameter.
     const proxiedImages = await proxyImageUrls(data.product.images || [])
     return {
       ...data.product,
@@ -441,8 +435,6 @@ export function useData(): DataContextValue {
     const { data: itemRows } = await supabase.from('bulk_run_items').select('*').eq('run_id', runId).order('created_at', { ascending: true })
     const items = (itemRows || []) as BulkRunItemRow[]
 
-    // VeRO protection: unless this batch has "Allow VeRO" enabled, block any item whose
-    // title matches the store's VeRO keyword list (same protection as the Single Add tab).
     let blockKeywords: string[] = ['amazon', 'amazon basics', 'amazonbasics', 'prime', 'fulfilled by amazon']
     if (!run.allow_vero) {
       const { data: veroSettings } = await supabase
@@ -475,6 +467,7 @@ export function useData(): DataContextValue {
         const product = await fetchAmazonProduct(item.asin, run.store_id)
         let title = item.custom_title || product.title
         let aspects: Record<string, string[]> | undefined
+        let aiDetectedCategoryId: string | undefined
         const price = product.suggestedPrice
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
@@ -487,6 +480,9 @@ export function useData(): DataContextValue {
 
         // AI Titles: only regenerate the title when the person didn't set a custom one for
         // this item — a custom title is an explicit override and should win either way.
+        // Also sends the store's ID (so the function can pull an eBay access token and look
+        // up that product's real category + official item-specifics list) and the raw Amazon
+        // specs, so the AI fills fields with real data instead of guessing from just the title.
         if (run.ai_titles && !item.custom_title) {
           try {
             const { data: aiData } = await supabase.functions.invoke('ai-generate-content', {
@@ -496,11 +492,14 @@ export function useData(): DataContextValue {
                 brand: product.brand,
                 category: product.category,
                 description: product.description,
+                specs: product.specs,
+                storeId: run.store_id,
               },
             })
-            const aiResult = (aiData || {}) as { title?: string; aspects?: Record<string, string[]> }
+            const aiResult = (aiData || {}) as { title?: string; aspects?: Record<string, string[]>; categoryId?: string }
             if (aiResult.title) title = aiResult.title
             if (aiResult.aspects && Object.keys(aiResult.aspects).length > 0) aspects = aiResult.aspects
+            if (aiResult.categoryId) aiDetectedCategoryId = aiResult.categoryId
           } catch {
             // AI titling is best-effort — fall back silently to the raw Amazon title.
           }
@@ -540,7 +539,7 @@ export function useData(): DataContextValue {
             image,
             images: product.images && product.images.length > 0 ? product.images : (image ? [image] : []),
             description,
-            categoryId: run.category_id || undefined,
+            categoryId: run.category_id || aiDetectedCategoryId || undefined,
             policyOverrides,
             aspects,
           })
@@ -608,9 +607,6 @@ export function useData(): DataContextValue {
     setBulkRuns(prev => prev.filter(r => r.id !== runId))
   }, [])
 
-  // Links a listing that already exists live on eBay (created outside this app) to its
-  // Amazon source ASIN, so it becomes trackable here (stock/price sync, drafts, etc).
-  // This does NOT create anything new on eBay — it only records the pairing locally.
   const linkExistingListings = useCallback(async (
     storeId: string,
     pairs: Array<{ ebayId: string; asin: string }>
@@ -633,8 +629,6 @@ export function useData(): DataContextValue {
           image = product.mainImage || product.images[0] || ''
           quantity = product.stock.toLowerCase().includes('out') ? 0 : 1
         } catch {
-          // Amazon fetch failed — still link the pair with placeholder data;
-          // price/title will fill in on the next stock sync.
           title = `Linked item ${pair.asin}`
         }
 
@@ -675,18 +669,12 @@ export function useData(): DataContextValue {
     await refresh()
   }, [refresh])
 
-  // Removes a listing from local tracking ONLY — never calls eBay. Use this when the eBay
-  // side is unreachable/broken (bad token, deleted account, etc.) but the person still wants
-  // this row gone from the app. The real eBay listing, if any, stays untouched.
   const removeListingLocal = useCallback(async (listingId: string) => {
     const { error } = await supabase.from('listings').delete().eq('id', listingId)
     if (error) throw new Error(error.message)
     setListings(prev => prev.filter(l => l.id !== listingId))
   }, [])
 
-  // Pulls in every listing already live on eBay for this store, regardless of how it was
-  // created — used for the initial import when connecting a real seller account that already
-  // has products, and re-runnable any time from the Listings page.
   const syncAllEbayListings = useCallback(async (storeId: string) => {
     const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
       method: 'POST',
@@ -745,9 +733,6 @@ export function useData(): DataContextValue {
           sessionStorage.removeItem('ebay_store_nickname')
           await refresh()
 
-          // One-time initial import: pull in every listing already live on this eBay
-          // account (regardless of how it was created), so nothing is missing on connect.
-          // Best-effort — a failure here shouldn't block the store from being connected.
           void fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
             method: 'POST',
             headers: {
