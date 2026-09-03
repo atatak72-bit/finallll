@@ -254,90 +254,35 @@ export function renderListingTemplate(template: string, data: Record<string, unk
 // The default template used for any store that hasn't saved a custom one yet in
 // Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
 // template produces a correctly-branded listing on every connected store automatically.
-export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 auto;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;user-select:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;">
-
-  <div style="background:#0f172a;padding:16px 24px;">
-    <table width="100%" cellpadding="0" cellspacing="0"><tr>
-      <td style="vertical-align:middle;">
-        <span style="font-size:14px;color:#5eead4;margin-right:6px;">&#9733;</span>
-        <span style="font-size:15px;font-weight:800;color:#ffffff;letter-spacing:0.5px;">{{store_name}}</span>
-      </td>
-      <td style="text-align:right;vertical-align:middle;">
-        <a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</a>
-        <a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</a>
-        <a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</a>
-      </td>
-    </tr></table>
-  </div>
-
-  <div style="height:4px;background:linear-gradient(90deg,#0f766e,#14b8a6,#5eead4);"></div>
-
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-bottom:1px solid #e2e8f0;"><tr>
-    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;">
-      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>We ship promptly
-    </td>
-    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
-      <div style="font-size:20px;">&#8635;</div><b style="color:#0f172a;">30-Day Returns</b><br>No hassle
-    </td>
-    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
-      <div style="font-size:20px;">&#128172;</div><b style="color:#0f172a;">Real Support</b><br>Fast responses
-    </td>
-    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
-      <div style="font-size:20px;">&#9989;</div><b style="color:#0f172a;">Guaranteed</b><br>100% satisfaction
-    </td>
-  </tr></table>
-
-  <table width="100%" cellpadding="0" cellspacing="0" style="padding:24px;"><tr>
-    <td style="vertical-align:top;width:58%;padding-right:20px;">
-      <h2 style="font-size:19px;color:#0f172a;margin:0 0 14px;line-height:1.35;">{{title}}</h2>
-      {{#feature_bullets}}
-      <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px;">Key Features</div>
-      <table cellpadding="0" cellspacing="0"><tr>
-        <td width="24" style="vertical-align:top;padding:4px 8px 4px 0;">
-          <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#0f766e;text-align:center;line-height:16px;color:#fff;font-size:11px;font-weight:bold;">&#10003;</span>
-        </td>
-        <td style="vertical-align:top;padding:4px 0;font-size:13px;line-height:1.6;color:#334155;">{{.}}</td>
-      </tr></table>
-      {{/feature_bullets}}
-      {{#product_description}}
-      <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin:18px 0 8px;">Description</div>
-      <p style="line-height:1.7;font-size:13px;color:#334155;margin:0;">{{.}}</p>
-      {{/product_description}}
-    </td>
-    <td style="vertical-align:top;width:42%;">
-      {{#main_image}}
-      <img src="{{.}}" alt="{{title}}" style="width:100%;border-radius:10px;border:1px solid #e2e8f0;display:block;" />
-      {{/main_image}}
-    </td>
-  </tr></table>
-
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:20px;border-top:1px solid #e2e8f0;"><tr>
-    <td style="width:50%;vertical-align:top;padding:8px;">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
-        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#127970; About Us</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">We're committed to quality products and a great shopping experience — our goal is to earn your trust with every order.</div>
-      </div>
-    </td>
-    <td style="width:50%;vertical-align:top;padding:8px;">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
-        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#128230; Shipping</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">We work hard to get every order shipped and to you as quickly as possible.</div>
-      </div>
-    </td>
-  </tr><tr>
-    <td style="width:50%;vertical-align:top;padding:8px;">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
-        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#8635; Returns</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">30-day return policy. Not fully satisfied? Contact us and we'll make it right.</div>
-      </div>
-    </td>
-    <td style="width:50%;vertical-align:top;padding:8px;">
-      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
-        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#9989; Satisfaction</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">Your satisfaction is our top priority — every customer deserves a great experience start to finish.</div>
-      </div>
-    </td>
-  </tr></table>
+export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:800px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;background:#fff;user-select:none;-webkit-user-select:none;">
+<div style="background:#0f172a;padding:10px 16px;">
+<table width="100%" cellpadding="0" cellspacing="0"><tr>
+<td style="font-size:13px;font-weight:700;color:#fff;">&#9733; {{store_name}}</td>
+<td align="right"><a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">New Arrivals</a> <a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">Feedback</a> <a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">Contact</a></td>
+</tr></table>
+</div>
+<div style="height:3px;background:#14b8a6;"></div>
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;"><tr>
+<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#128666; Fast Shipping</td>
+<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#8635; 30-Day Returns</td>
+<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#128172; Real Support</td>
+<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#9989; Guaranteed</td>
+</tr></table>
+<table width="100%" cellpadding="0" cellspacing="0" style="padding:16px;"><tr>
+<td valign="top" width="58%" style="padding-right:12px;">
+<h2 style="font-size:16px;color:#0f172a;margin:0 0 8px;">{{title}}</h2>
+<ul style="margin:6px 0;padding-left:16px;font-size:12px;color:#334155;line-height:1.5;">{{#feature_bullets}}<li>{{.}}</li>{{/feature_bullets}}</ul>
+{{#product_description}}<p style="font-size:12px;color:#334155;line-height:1.5;margin:8px 0 0;">{{.}}</p>{{/product_description}}
+</td>
+<td valign="top" width="42%">{{#main_image}}<img src="{{.}}" alt="{{title}}" style="width:100%;border-radius:6px;" />{{/main_image}}</td>
+</tr></table>
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:12px 16px;font-size:11px;color:#64748b;border-top:1px solid #e2e8f0;"><tr>
+<td width="50%" valign="top"><b style="color:#0f172a;">About:</b> Quality products, great service.</td>
+<td width="50%" valign="top"><b style="color:#0f172a;">Shipping:</b> Fast dispatch, every order.</td>
+</tr><tr>
+<td width="50%" valign="top" style="padding-top:6px;"><b style="color:#0f172a;">Returns:</b> 30-day policy, hassle-free.</td>
+<td width="50%" valign="top" style="padding-top:6px;"><b style="color:#0f172a;">Support:</b> Here for you, always.</td>
+</tr></table>
 </div>`
 
 
