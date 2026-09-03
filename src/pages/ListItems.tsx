@@ -122,7 +122,9 @@ function extractItemSpecifics(product: any): { key: string; value: string }[] {
       if (prev.length < nv.length) seen.set(keyLower, nv)
     }
   }
-  add('Brand', product?.brand ?? product?.manufacturer)
+  // Brand is deliberately never populated with the real brand name here — set to a safe
+  // placeholder instead, consistently with the AI-generated specifics (see ai-generate-content).
+  seen.set('brand', 'Does not apply')
   add('MPN', product?.mpn ?? product?.manufacturerPartNumber)
   add('Model', product?.model)
   const sources = [product?.specifications, product?.attributes, product?.product_information, product?.details, product?.product_overview]
@@ -234,6 +236,8 @@ export default function ListItems() {
   const [publishError, setPublishError] = useState<string | null>(null)
   const [publishSuccess, setPublishSuccess] = useState<string | null>(null)
   const [generatingTitle, setGeneratingTitle] = useState(false)
+  const [aiTitleError, setAiTitleError] = useState<string | null>(null)
+  const [currentListingTemplate, setCurrentListingTemplate] = useState('')
   const [promoted, setPromoted] = useState(true)
 
   const [reviewTitle, setReviewTitle] = useState('')
@@ -405,6 +409,7 @@ export default function ListItems() {
         .eq('store_id', singleStore?.id || '')
         .maybeSingle()
       const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
+      setCurrentListingTemplate(listingTemplate)
       const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
       const builtDesc = renderListingTemplate(listingTemplate, {
         title: fetched?.title || '',
@@ -445,8 +450,9 @@ export default function ListItems() {
   const handleGenerateTitle = async () => {
     if (!product) return
     setGeneratingTitle(true)
+    setAiTitleError(null)
     try {
-      const { data } = await supabase.functions.invoke('ai-generate-content', {
+      const { data, error: invokeError } = await supabase.functions.invoke('ai-generate-content', {
         body: {
           title: product.title,
           bullets: product.bulletPoints,
@@ -457,7 +463,17 @@ export default function ListItems() {
           storeId: singleStore?.id,
         },
       })
-      const result = (data || {}) as { title?: string; aspects?: Record<string, string[]>; aiUsed?: boolean }
+      if (invokeError) {
+        setAiTitleError(invokeError.message || 'AI request failed')
+        return
+      }
+      const result = (data || {}) as { title?: string; description?: string; aspects?: Record<string, string[]>; aiUsed?: boolean; error?: string }
+      if (result.error) {
+        setAiTitleError(result.error)
+      }
+      if (!result.aiUsed) {
+        setAiTitleError(prev => prev || 'AI did not return usable data (check that ANTHROPIC_API_KEY is set in Supabase secrets).')
+      }
       if (result.title) {
         setReviewTitle(truncateTitleTo80(result.title))
       }
@@ -469,8 +485,18 @@ export default function ListItems() {
           }))
         )
       }
-    } catch {
-      // Best-effort — leave the existing title/specifics untouched if the AI call fails.
+      const template = currentListingTemplate || DEFAULT_LISTING_TEMPLATE
+      const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
+      const rebuilt = renderListingTemplate(template, {
+        title: result.title || product.title || '',
+        store_name: storeName,
+        main_image: product.mainImage || product.images?.[0] || '',
+        product_description: result.description || product.description || '',
+        feature_bullets: product.bulletPoints || [],
+      })
+      setReviewDescription(rebuilt)
+    } catch (err) {
+      setAiTitleError(err instanceof Error ? err.message : 'AI request failed')
     } finally {
       setGeneratingTitle(false)
     }
@@ -924,6 +950,9 @@ export default function ListItems() {
                         {generatingTitle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />} Generate AI Title
                       </button>
                     </div>
+                    {aiTitleError && (
+                      <p className="text-xs text-error-600 bg-error-50 rounded px-2 py-1 mb-2">{aiTitleError}</p>
+                    )}
                     <input
                       className={cn("input", titleViolation && "border-red-500 bg-red-50 focus:ring-red-500 text-red-900")}
                       value={reviewTitle}
