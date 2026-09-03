@@ -12,7 +12,7 @@ import { teamMembers } from '../data/mockData'
 import StoreConnectionSection from './StoreConnectionSection'
 import { ConnectStoreModal } from '../components/ConnectStoreModal'
 import { useStoreData } from '../lib/DataContext'
-import { formatCurrency, formatDate, cn, calculateEbayPrice } from '../lib/utils'
+import { formatCurrency, formatDate, cn, calculateEbayPrice, renderListingTemplate, DEFAULT_LISTING_TEMPLATE } from '../lib/utils'
 import { supabase } from '../lib/supabase'
 
 type Section = 'general' | 'ebay-policies' | 'filters' | 'templates' | 'auto-messages' | 'auto-ordering' | 'tracking' | 'advanced' | 'team'
@@ -1774,86 +1774,185 @@ function VeroSection() {
 }
 
 function ListingTemplateSection() {
-  const [template, setTemplate] = useState(`{{title}}
+  const { stores } = useStoreData()
+  const connectedStores = stores.filter(s => s.connected)
+  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  const activeStoreName = activeStore?.ebayUsername || activeStore?.nickname || 'Our Store'
 
-Welcome to {{store_name}}!
-
-{{#product_description}}
-Product Description:
-{{product_description}}
-{{/product_description}}
-
-{{#feature_bullets}}
-• {{.}}
-{{/feature_bullets}}
-
-{{#product_details}}
-Product Details:
-{{.}}
-{{/product_details}}
-
-Thank you for shopping with us!`)
+  const [template, setTemplate] = useState(DEFAULT_LISTING_TEMPLATE)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [savingAll, setSavingAll] = useState(false)
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   const variables = [
     { name: '{{title}}', desc: 'Listing title' },
     { name: '{{store_name}}', desc: 'Your eBay store name' },
-    { name: '{{main_image}}', desc: 'Main product image URL' },
-    { name: '{{#product_description}}', desc: 'Product description block' },
-    { name: '{{#feature_bullets}}', desc: 'Feature bullets block' },
-    { name: '{{#product_details}}', desc: 'Product details block' },
+    { name: '{{#main_image}}...{{/main_image}}', desc: 'Main product image (use {{.}} inside for the URL)' },
+    { name: '{{#product_description}}...{{/product_description}}', desc: 'Product description block (use {{.}} inside)' },
+    { name: '{{#feature_bullets}}...{{/feature_bullets}}', desc: 'Loops once per bullet point (use {{.}} inside for each one)' },
   ]
+
+  useEffect(() => {
+    if (!toast) return
+    const timer = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(timer)
+  }, [toast])
+
+  useEffect(() => {
+    if (!activeStore?.id) return
+    let cancelled = false
+    setLoading(true)
+
+    async function load() {
+      const { data, error: dbErr } = await supabase
+        .from('listing_templates')
+        .select('template')
+        .eq('store_id', activeStore!.id)
+        .maybeSingle()
+      if (cancelled) return
+      if (dbErr) {
+        setToast({ type: 'error', msg: 'Failed to load your saved template.' })
+      } else if (data?.template) {
+        setTemplate(data.template)
+      } else {
+        setTemplate(DEFAULT_LISTING_TEMPLATE)
+      }
+      setLoading(false)
+    }
+
+    void load()
+    return () => { cancelled = true }
+  }, [activeStore?.id])
+
+  function insertVariable(token: string) {
+    setTemplate(prev => prev + '\n' + token)
+  }
+
+  async function persistAll(storeIds: string[]) {
+    const now = new Date().toISOString()
+    for (const sid of storeIds) {
+      const { error } = await supabase.from('listing_templates').upsert({
+        store_id: sid,
+        template,
+        updated_at: now,
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+    }
+  }
+
+  async function saveTemplate(forAllStores = false) {
+    if (!activeStore?.id) return
+    if (forAllStores) setSavingAll(true); else setSaving(true)
+    setToast(null)
+    try {
+      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
+      await persistAll(storeIds)
+      setToast({
+        type: 'success',
+        msg: forAllStores
+          ? `Template saved for all ${storeIds.length} connected stores.`
+          : 'Template saved.',
+      })
+    } catch (err) {
+      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save template.' })
+    } finally {
+      if (forAllStores) setSavingAll(false); else setSaving(false)
+    }
+  }
+
+  // Live preview — same rendering engine used when a real listing is built, fed with
+  // realistic sample data (and this store's real name) so what you see here is exactly
+  // what buyers will see, not a disconnected mockup.
+  const previewHtml = renderListingTemplate(template, {
+    title: 'Wireless Bluetooth Earbuds Pro Max',
+    store_name: activeStoreName,
+    main_image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400',
+    product_description: 'Experience premium sound with these Wireless Bluetooth Earbuds Pro Max, featuring industry-leading noise cancellation and a comfortable, secure fit for all-day wear.',
+    feature_bullets: ['Active Noise Cancelling', '30-Hour Playtime', 'Wireless Charging Case', 'IPX5 Water Resistant'],
+  })
+
+  if (connectedStores.length === 0) {
+    return <div className="card p-8 text-center text-sm text-slate-500">Connect an eBay store first to set up a listing template.</div>
+  }
 
   return (
     <div className="space-y-6">
       <div className="card">
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">Listing Template</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Variables you can use:</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Editing for <span className="font-medium text-slate-700">{activeStoreName}</span>. This exact template is used automatically every time a product is listed from Single Add or Bulk Add. Variables you can use:
+          </p>
         </div>
         <div className="card-body space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {variables.map(v => (
-              <button
-                key={v.name}
-                onClick={() => setTemplate(template + '\n' + v.name)}
-                className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition"
-                title={v.desc}
-              >
-                {v.name}
+          {loading ? (
+            <div className="p-6 text-center text-sm text-slate-500">Loading your template…</div>
+          ) : (
+            <>
+              <div className="flex flex-wrap gap-2">
+                {variables.map(v => (
+                  <button
+                    key={v.name}
+                    onClick={() => insertVariable(v.name)}
+                    className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition"
+                    title={v.desc}
+                  >
+                    {v.name}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                className="input min-h-[300px] resize-y font-mono text-xs"
+                value={template}
+                onChange={e => setTemplate(e.target.value)}
+              />
+              <button className="btn-ghost text-xs text-slate-500" onClick={() => setTemplate(DEFAULT_LISTING_TEMPLATE)}>
+                Reset to default design
               </button>
-            ))}
-          </div>
-          <textarea
-            className="input min-h-[250px] resize-y font-mono text-sm"
-            value={template}
-            onChange={e => setTemplate(e.target.value)}
-          />
+            </>
+          )}
         </div>
       </div>
 
-      {/* Preview */}
+      {/* Live preview — renders the actual template through the actual engine */}
       <div className="card">
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">Preview</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Sample data — not a real listing.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Sample product data, your real store name — this is exactly what eBay will render.</p>
         </div>
         <div className="card-body">
-          <div className="border border-slate-200 rounded-lg p-4 bg-white prose prose-sm max-w-none">
-            <h4 className="font-semibold text-slate-900">Wireless Bluetooth Earbuds Pro Max</h4>
-            <p>Welcome to Main Store!</p>
-            <p>Product Description:<br />Experience premium sound with these Wireless Bluetooth Earbuds Pro Max.</p>
-            <p>• Active Noise Cancelling<br />• 30H Playtime<br />• Wireless Charging Case</p>
-            <p>Product Details:<br />Brand: SoundCore · Color: Black · Weight: 50g</p>
-            <p>Thank you for shopping with us!</p>
-          </div>
+          <div className="border border-slate-200 rounded-lg p-4 bg-white overflow-x-auto" dangerouslySetInnerHTML={{ __html: previewHtml }} />
         </div>
       </div>
 
-      <button className="btn-primary"><Save className="w-4 h-4" /> Save Template</button>
+      {toast && (
+        <div className={cn(
+          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
+          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
+        )}>
+          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
+          <span className="text-sm font-medium">{toast.msg}</span>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button className="btn-primary" onClick={() => void saveTemplate(false)} disabled={saving || savingAll || loading}>
+          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+          {saving ? 'Saving…' : 'Save Template'}
+        </button>
+        <button
+          className="btn-secondary"
+          onClick={() => void saveTemplate(true)}
+          disabled={saving || savingAll || loading || connectedStores.length === 0}
+        >
+          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+          {savingAll ? 'Saving…' : 'Save for all stores'}
+        </button>
+      </div>
     </div>
   )
 }
-
 type MessageTemplate = {
   id: string
   name: string
