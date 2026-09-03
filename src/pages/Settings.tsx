@@ -12,7 +12,7 @@ import { teamMembers } from '../data/mockData'
 import StoreConnectionSection from './StoreConnectionSection'
 import { ConnectStoreModal } from '../components/ConnectStoreModal'
 import { useStoreData } from '../lib/DataContext'
-import { formatCurrency, formatDate, cn, calculateEbayPrice, renderListingTemplate, DEFAULT_LISTING_TEMPLATE } from '../lib/utils'
+import { formatCurrency, formatDate, cn, calculateEbayPrice, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE } from '../lib/utils'
 import { supabase } from '../lib/supabase'
 
 type Section = 'general' | 'ebay-policies' | 'filters' | 'templates' | 'auto-messages' | 'auto-ordering' | 'tracking' | 'advanced' | 'team'
@@ -1864,7 +1864,7 @@ function ListingTemplateSection() {
   // Live preview — same rendering engine used when a real listing is built, fed with
   // realistic sample data (and this store's real name) so what you see here is exactly
   // what buyers will see, not a disconnected mockup.
-  const previewHtml = renderListingTemplate(template, {
+  const previewHtml = fitDescriptionToBudget(template, {
     title: 'Wireless Bluetooth Earbuds Pro Max',
     store_name: activeStoreName,
     main_image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400',
