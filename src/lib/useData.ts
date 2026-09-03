@@ -485,19 +485,12 @@ export function useData(): DataContextValue {
         const price = product.suggestedPrice
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
-        let description = renderListingTemplate(listingTemplate, {
-          title: product.title,
-          store_name: templateStoreName,
-          main_image: product.mainImage || product.images[0] || '',
-          product_description: product.description,
-          feature_bullets: product.bulletPoints,
-        })
-
         // AI Titles: only regenerate the title when the person didn't set a custom one for
         // this item — a custom title is an explicit override and should win either way.
         // Also sends the store's ID (so the function can pull an eBay access token and look
         // up that product's real category + official item-specifics list) and the raw Amazon
         // specs, so the AI fills fields with real data instead of guessing from just the title.
+        let aiDescription: string | undefined
         if (run.ai_titles && !item.custom_title) {
           try {
             const { data: aiData } = await supabase.functions.invoke('ai-generate-content', {
@@ -511,14 +504,23 @@ export function useData(): DataContextValue {
                 storeId: run.store_id,
               },
             })
-            const aiResult = (aiData || {}) as { title?: string; aspects?: Record<string, string[]>; categoryId?: string }
+            const aiResult = (aiData || {}) as { title?: string; description?: string; aspects?: Record<string, string[]>; categoryId?: string }
             if (aiResult.title) title = aiResult.title
+            if (aiResult.description) aiDescription = aiResult.description
             if (aiResult.aspects && Object.keys(aiResult.aspects).length > 0) aspects = aiResult.aspects
             if (aiResult.categoryId) aiDetectedCategoryId = aiResult.categoryId
           } catch {
             // AI titling is best-effort — fall back silently to the raw Amazon title.
           }
         }
+
+        let description = renderListingTemplate(listingTemplate, {
+          title,
+          store_name: templateStoreName,
+          main_image: product.mainImage || product.images[0] || '',
+          product_description: aiDescription || product.description,
+          feature_bullets: product.bulletPoints,
+        })
 
         processedTitle = title
         processedImage = image
