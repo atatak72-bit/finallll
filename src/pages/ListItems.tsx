@@ -4,7 +4,7 @@ import {
   AlertCircle, CheckCircle2, Sparkles, Layers, FileText, Loader2,
   ShieldAlert, ListChecks, Plus, Trash2, Wand2, X
 } from 'lucide-react'
-import { cn, formatCurrency, calculateEbayPrice, buildTemplateDescription, type PricingTierInput } from '../lib/utils'
+import { cn, formatCurrency, calculateEbayPrice, renderListingTemplate, DEFAULT_LISTING_TEMPLATE, type PricingTierInput } from '../lib/utils'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import type { AmazonProduct } from '../lib/useData'
@@ -399,7 +399,20 @@ export default function ListItems() {
       const isOut = String(fetched?.stock ?? '').toLowerCase().includes('out')
       setQuantity(isOut ? 0 : (Number(fetched?.defaultQuantity) || 1))
 
-      const builtDesc = buildTemplateDescription(fetched)
+      const { data: templateRow } = await supabase
+        .from('listing_templates')
+        .select('template')
+        .eq('store_id', singleStore?.id || '')
+        .maybeSingle()
+      const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
+      const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
+      const builtDesc = renderListingTemplate(listingTemplate, {
+        title: fetched?.title || '',
+        store_name: storeName,
+        main_image: fetched?.mainImage || fetched?.images?.[0] || '',
+        product_description: fetched?.description || '',
+        feature_bullets: fetched?.bulletPoints || [],
+      })
       setReviewDescription(builtDesc)
 
       const specs = extractItemSpecifics(fetched)
