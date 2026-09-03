@@ -4,7 +4,7 @@ import {
   AlertCircle, CheckCircle2, Sparkles, Layers, FileText, Loader2,
   ShieldAlert, ListChecks, Plus, Trash2, Wand2, X
 } from 'lucide-react'
-import { cn, formatCurrency, calculateEbayPrice, renderListingTemplate, DEFAULT_LISTING_TEMPLATE, type PricingTierInput } from '../lib/utils'
+import { cn, formatCurrency, calculateEbayPrice, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, type PricingTierInput } from '../lib/utils'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import type { AmazonProduct } from '../lib/useData'
@@ -412,7 +412,7 @@ export default function ListItems() {
       const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
       setCurrentListingTemplate(listingTemplate)
       const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
-      const builtDesc = renderListingTemplate(listingTemplate, {
+      const builtDesc = fitDescriptionToBudget(listingTemplate, {
         title: fetched?.title || '',
         store_name: storeName,
         main_image: fetched?.mainImage || fetched?.images?.[0] || '',
@@ -492,7 +492,7 @@ export default function ListItems() {
       }
       const template = currentListingTemplate || DEFAULT_LISTING_TEMPLATE
       const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
-      const rebuilt = renderListingTemplate(template, {
+      const rebuilt = fitDescriptionToBudget(template, {
         title: result.title || product.title || '',
         store_name: storeName,
         main_image: product.mainImage || product.images?.[0] || '',
