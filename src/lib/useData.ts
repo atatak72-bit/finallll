@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls } from './utils'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, DEFAULT_LISTING_TEMPLATE } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -453,6 +453,20 @@ export function useData(): DataContextValue {
         }
       : undefined
 
+    const { data: templateRow } = await supabase
+      .from('listing_templates')
+      .select('template')
+      .eq('store_id', run.store_id)
+      .maybeSingle()
+    const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
+
+    const { data: templateStoreRow } = await supabase
+      .from('ebay_tokens')
+      .select('ebay_username, store_nickname')
+      .eq('id', run.store_id)
+      .maybeSingle()
+    const templateStoreName = templateStoreRow?.ebay_username || templateStoreRow?.store_nickname || 'Our Store'
+
     let succeeded = 0
     let failed = 0
 
@@ -471,11 +485,12 @@ export function useData(): DataContextValue {
         const price = product.suggestedPrice
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
-        let description = buildTemplateDescription({
+        let description = renderListingTemplate(listingTemplate, {
           title: product.title,
-          bulletPoints: product.bulletPoints,
-          description: product.description,
-          images: product.images,
+          store_name: templateStoreName,
+          main_image: product.mainImage || product.images[0] || '',
+          product_description: product.description,
+          feature_bullets: product.bulletPoints,
         })
 
         // AI Titles: only regenerate the title when the person didn't set a custom one for
