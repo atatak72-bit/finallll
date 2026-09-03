@@ -151,9 +151,9 @@ export function buildTemplateDescription(product: {
         <span style="font-size:13px;font-weight:700;color:#ffffff;letter-spacing:1px;text-transform:uppercase;">Trusted Seller</span>
       </td>
       <td style="text-align:right;vertical-align:middle;">
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</span>
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</span>
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</span>
+        <a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</a>
+        <a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</a>
+        <a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</a>
       </td>
     </tr></table>
   </div>
@@ -164,7 +164,7 @@ export function buildTemplateDescription(product: {
   <!-- Trust badges -->
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-bottom:1px solid #e2e8f0;"><tr>
     <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;">
-      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>1-2 business days
+      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>We ship promptly
     </td>
     <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
       <div style="font-size:20px;">&#8635;</div><b style="color:#0f172a;">30-Day Returns</b><br>No hassle
@@ -207,7 +207,7 @@ export function buildTemplateDescription(product: {
     <td style="width:50%;vertical-align:top;padding:8px;">
       <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
         <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#128230; Shipping</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">Orders ship within 1-2 business days. We work hard to get every order to you as quickly as possible.</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">We work hard to get every order shipped and to you as quickly as possible.</div>
       </div>
     </td>
   </tr><tr>
@@ -254,7 +254,7 @@ export function renderListingTemplate(template: string, data: Record<string, unk
 // The default template used for any store that hasn't saved a custom one yet in
 // Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
 // template produces a correctly-branded listing on every connected store automatically.
-export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 auto;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;">
+export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 auto;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;user-select:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;">
 
   <div style="background:#0f172a;padding:16px 24px;">
     <table width="100%" cellpadding="0" cellspacing="0"><tr>
@@ -263,9 +263,9 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 au
         <span style="font-size:15px;font-weight:800;color:#ffffff;letter-spacing:0.5px;">{{store_name}}</span>
       </td>
       <td style="text-align:right;vertical-align:middle;">
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</span>
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</span>
-        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</span>
+        <a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</a>
+        <a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</a>
+        <a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" rel="noopener" style="font-size:11px;color:#cbd5e1;text-decoration:none;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</a>
       </td>
     </tr></table>
   </div>
@@ -274,7 +274,7 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 au
 
   <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-bottom:1px solid #e2e8f0;"><tr>
     <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;">
-      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>1-2 business days
+      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>We ship promptly
     </td>
     <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
       <div style="font-size:20px;">&#8635;</div><b style="color:#0f172a;">30-Day Returns</b><br>No hassle
@@ -321,7 +321,7 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 au
     <td style="width:50%;vertical-align:top;padding:8px;">
       <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
         <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#128230; Shipping</div>
-        <div style="font-size:12px;color:#64748b;line-height:1.6;">Orders ship within 1-2 business days. We work hard to get every order to you as quickly as possible.</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">We work hard to get every order shipped and to you as quickly as possible.</div>
       </div>
     </td>
   </tr><tr>
