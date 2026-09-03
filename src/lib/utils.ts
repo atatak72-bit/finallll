@@ -226,3 +226,117 @@ export function buildTemplateDescription(product: {
   </tr></table>
 </div>`
 }
+
+// ---- Editable listing-description template engine (Settings > Templates) ----
+// A tiny Mustache-style renderer: {{key}} does a plain substitution; {{#key}}...{{/key}}
+// either loops (if data[key] is an array, with {{.}} referring to the current item) or
+// shows the block once (if data[key] is a truthy string, with {{.}} referring to that
+// string) — and is omitted entirely if data[key] is empty/falsy.
+export function renderListingTemplate(template: string, data: Record<string, unknown>): string {
+  let out = template.replace(/{{#(\w+)}}([\s\S]*?){{\/\1}}/g, (_match, key: string, inner: string) => {
+    const value = data[key]
+    if (Array.isArray(value)) {
+      return value.map(item => renderListingTemplate(inner, { ...data, '.': item })).join('')
+    }
+    if (value) {
+      return renderListingTemplate(inner, { ...data, '.': value })
+    }
+    return ''
+  })
+  out = out.replace(/{{\s*([.\w]+)\s*}}/g, (_match, key: string) => {
+    const value = data[key]
+    if (value === undefined || value === null || Array.isArray(value)) return ''
+    return String(value)
+  })
+  return out
+}
+
+// The default template used for any store that hasn't saved a custom one yet in
+// Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
+// template produces a correctly-branded listing on every connected store automatically.
+export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 auto;font-family:'Segoe UI',Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#ffffff;">
+
+  <div style="background:#0f172a;padding:16px 24px;">
+    <table width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="vertical-align:middle;">
+        <span style="font-size:14px;color:#5eead4;margin-right:6px;">&#9733;</span>
+        <span style="font-size:15px;font-weight:800;color:#ffffff;letter-spacing:0.5px;">{{store_name}}</span>
+      </td>
+      <td style="text-align:right;vertical-align:middle;">
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">New Arrivals</span>
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Feedback</span>
+        <span style="font-size:11px;color:#cbd5e1;padding:4px 10px;border:1px solid #334155;border-radius:20px;margin-left:6px;">Contact</span>
+      </td>
+    </tr></table>
+  </div>
+
+  <div style="height:4px;background:linear-gradient(90deg,#0f766e,#14b8a6,#5eead4);"></div>
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-bottom:1px solid #e2e8f0;"><tr>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;">
+      <div style="font-size:20px;">&#128666;</div><b style="color:#0f172a;">Fast Shipping</b><br>1-2 business days
+    </td>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#8635;</div><b style="color:#0f172a;">30-Day Returns</b><br>No hassle
+    </td>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#128172;</div><b style="color:#0f172a;">Real Support</b><br>Fast responses
+    </td>
+    <td style="text-align:center;padding:16px 6px;font-size:11px;color:#475569;border-left:1px solid #e2e8f0;">
+      <div style="font-size:20px;">&#9989;</div><b style="color:#0f172a;">Guaranteed</b><br>100% satisfaction
+    </td>
+  </tr></table>
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="padding:24px;"><tr>
+    <td style="vertical-align:top;width:58%;padding-right:20px;">
+      <h2 style="font-size:19px;color:#0f172a;margin:0 0 14px;line-height:1.35;">{{title}}</h2>
+      {{#feature_bullets}}
+      <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:8px;">Key Features</div>
+      <table cellpadding="0" cellspacing="0"><tr>
+        <td width="24" style="vertical-align:top;padding:4px 8px 4px 0;">
+          <span style="display:inline-block;width:16px;height:16px;border-radius:50%;background:#0f766e;text-align:center;line-height:16px;color:#fff;font-size:11px;font-weight:bold;">&#10003;</span>
+        </td>
+        <td style="vertical-align:top;padding:4px 0;font-size:13px;line-height:1.6;color:#334155;">{{.}}</td>
+      </tr></table>
+      {{/feature_bullets}}
+      {{#product_description}}
+      <div style="font-size:12px;font-weight:700;color:#0f766e;letter-spacing:0.5px;text-transform:uppercase;margin:18px 0 8px;">Description</div>
+      <p style="line-height:1.7;font-size:13px;color:#334155;margin:0;">{{.}}</p>
+      {{/product_description}}
+    </td>
+    <td style="vertical-align:top;width:42%;">
+      {{#main_image}}
+      <img src="{{.}}" alt="{{title}}" style="width:100%;border-radius:10px;border:1px solid #e2e8f0;display:block;" />
+      {{/main_image}}
+    </td>
+  </tr></table>
+
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:20px;border-top:1px solid #e2e8f0;"><tr>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#127970; About Us</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">We're committed to quality products and a great shopping experience — our goal is to earn your trust with every order.</div>
+      </div>
+    </td>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#128230; Shipping</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">Orders ship within 1-2 business days. We work hard to get every order to you as quickly as possible.</div>
+      </div>
+    </td>
+  </tr><tr>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#8635; Returns</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">30-day return policy. Not fully satisfied? Contact us and we'll make it right.</div>
+      </div>
+    </td>
+    <td style="width:50%;vertical-align:top;padding:8px;">
+      <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+        <div style="font-size:12px;font-weight:700;color:#0f172a;margin-bottom:4px;">&#9989; Satisfaction</div>
+        <div style="font-size:12px;color:#64748b;line-height:1.6;">Your satisfaction is our top priority — every customer deserves a great experience start to finish.</div>
+      </div>
+    </td>
+  </tr></table>
+</div>`
+
