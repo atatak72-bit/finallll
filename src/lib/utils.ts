@@ -340,3 +340,28 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:820px;margin:0 au
   </tr></table>
 </div>`
 
+
+// eBay's inventory item "description" field has a hard 4000-character limit. Our branded
+// template's fixed markup (header, badges, footer cards, etc.) already uses a meaningful
+// chunk of that budget, so instead of letting the whole render blow past the limit (and
+// risk eBay rejecting the listing, or worse, truncating raw HTML mid-tag), this measures
+// the template's fixed overhead first and trims only the flexible part — the actual
+// product_description text — to whatever room is left. Bullets/title/images stay intact.
+export function fitDescriptionToBudget(
+  template: string,
+  data: Record<string, unknown>,
+  maxTotal = 4000,
+): string {
+  const withoutDesc = renderListingTemplate(template, { ...data, product_description: '' })
+  const margin = 50
+  const budget = Math.max(0, maxTotal - withoutDesc.length - margin)
+  const rawDesc = String(data.product_description || '')
+  let trimmedDesc = rawDesc
+  if (rawDesc.length > budget) {
+    trimmedDesc = rawDesc.slice(0, budget)
+    const lastSpace = trimmedDesc.lastIndexOf(' ')
+    if (lastSpace > budget * 0.7) trimmedDesc = trimmedDesc.slice(0, lastSpace)
+    trimmedDesc = trimmedDesc.trim()
+  }
+  return renderListingTemplate(template, { ...data, product_description: trimmedDesc })
+}
