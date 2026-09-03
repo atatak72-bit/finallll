@@ -442,16 +442,38 @@ export default function ListItems() {
     setItemSpecifics(updated)
   }
 
-  const handleGenerateTitle = () => {
+  const handleGenerateTitle = async () => {
     if (!product) return
     setGeneratingTitle(true)
-    let cleaned = (reviewTitle || product.title || '')
-      .replace(/amazon basics|amazonbasics|amazon|prime/gi, '')
-      .replace(/\s{2,}/g, ' ')
-      .trim()
-    cleaned = truncateTitleTo80(cleaned)
-    setReviewTitle(cleaned)
-    setTimeout(() => setGeneratingTitle(false), 300)
+    try {
+      const { data } = await supabase.functions.invoke('ai-generate-content', {
+        body: {
+          title: product.title,
+          bullets: product.bulletPoints,
+          brand: product.brand,
+          category: product.category,
+          description: product.description,
+          specs: product.specs,
+          storeId: singleStore?.id,
+        },
+      })
+      const result = (data || {}) as { title?: string; aspects?: Record<string, string[]>; aiUsed?: boolean }
+      if (result.title) {
+        setReviewTitle(truncateTitleTo80(result.title))
+      }
+      if (result.aspects && Object.keys(result.aspects).length > 0) {
+        setItemSpecifics(
+          Object.entries(result.aspects).map(([key, value]) => ({
+            key,
+            value: Array.isArray(value) ? (value[0] || '') : String(value),
+          }))
+        )
+      }
+    } catch {
+      // Best-effort — leave the existing title/specifics untouched if the AI call fails.
+    } finally {
+      setGeneratingTitle(false)
+    }
   }
 
   const handlePublish = async () => {
@@ -898,7 +920,7 @@ export default function ListItems() {
                   <div>
                     <div className="flex items-center justify-between mb-1.5">
                       <label className="label mb-0">Title</label>
-                      <button onClick={handleGenerateTitle} disabled={generatingTitle} className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1 disabled:opacity-50">
+                      <button onClick={() => void handleGenerateTitle()} disabled={generatingTitle} className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1 disabled:opacity-50">
                         {generatingTitle ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />} Generate AI Title
                       </button>
                     </div>
@@ -993,6 +1015,15 @@ export default function ListItems() {
                     className={cn("input min-h-[160px] resize-y text-sm leading-relaxed font-sans", descViolation && "border-red-500 bg-red-50 focus:ring-red-500 text-red-900")}
                     value={reviewDescription}
                     onChange={e => setReviewDescription(e.target.value)}
+                  />
+                  <p className="mt-1 text-xs text-slate-400">This is the raw HTML sent to eBay — see how it actually renders below.</p>
+                </div>
+
+                <div>
+                  <label className="label">Description Preview</label>
+                  <div
+                    className="border border-slate-200 rounded-lg p-4 bg-white overflow-x-auto"
+                    dangerouslySetInnerHTML={{ __html: reviewDescription }}
                   />
                 </div>
 
