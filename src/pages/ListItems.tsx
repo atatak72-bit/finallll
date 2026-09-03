@@ -245,6 +245,7 @@ export default function ListItems() {
   const [reviewPrice, setReviewPrice] = useState('')
   const [quantity, setQuantity] = useState(1)
   const [selectedCategory, setSelectedCategory] = useState<string>('')
+  const [selectedCategoryName, setSelectedCategoryName] = useState<string>('')
 
   const [itemSpecifics, setItemSpecifics] = useState<ItemSpecific[]>([])
 
@@ -467,7 +468,7 @@ export default function ListItems() {
         setAiTitleError(invokeError.message || 'AI request failed')
         return
       }
-      const result = (data || {}) as { title?: string; description?: string; aspects?: Record<string, string[]>; aiUsed?: boolean; error?: string }
+      const result = (data || {}) as { title?: string; description?: string; aspects?: Record<string, string[]>; aiUsed?: boolean; error?: string; categoryId?: string; categoryName?: string }
       if (result.error) {
         setAiTitleError(result.error)
       }
@@ -476,6 +477,10 @@ export default function ListItems() {
       }
       if (result.title) {
         setReviewTitle(truncateTitleTo80(result.title))
+      }
+      if (result.categoryId) {
+        setSelectedCategory(result.categoryId)
+        setSelectedCategoryName(result.categoryName || result.categoryId)
       }
       if (result.aspects && Object.keys(result.aspects).length > 0) {
         setItemSpecifics(
@@ -985,7 +990,7 @@ export default function ListItems() {
                     <div className="flex gap-2">
                       <select className="input flex-1" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
                         <option value="">{product.category || 'Choose an eBay category'}</option>
-                        {selectedCategory && <option value={selectedCategory}>{selectedCategory}</option>}
+                        {selectedCategory && <option value={selectedCategory}>{selectedCategoryName || selectedCategory}</option>}
                       </select>
                       <button onClick={() => setSelectedCategory(detectCategorySuggestion(product))} className="btn-secondary text-xs">Suggest</button>
                     </div>
