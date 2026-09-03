@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, DEFAULT_LISTING_TEMPLATE } from './utils'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -514,7 +514,7 @@ export function useData(): DataContextValue {
           }
         }
 
-        let description = renderListingTemplate(listingTemplate, {
+        let description = fitDescriptionToBudget(listingTemplate, {
           title,
           store_name: templateStoreName,
           main_image: product.mainImage || product.images[0] || '',
