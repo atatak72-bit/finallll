@@ -255,19 +255,19 @@ export function renderListingTemplate(template: string, data: Record<string, unk
 // Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
 // template produces a correctly-branded listing on every connected store automatically.
 export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:800px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;background:#fff;user-select:none;-webkit-user-select:none;">
-<div style="background:#0f172a;padding:10px 16px;">
-<table width="100%" cellpadding="0" cellspacing="0"><tr>
-<td style="font-size:13px;font-weight:700;color:#fff;">&#9733; {{store_name}}</td>
-<td align="right"><a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">New Arrivals</a> <a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">Feedback</a> <a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" style="font-size:10px;color:#cbd5e1;text-decoration:none;margin-left:6px;">Contact</a></td>
-</tr></table>
+<div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:16px;text-align:center;color:#fff;">
+<div style="font-size:17px;font-weight:800;letter-spacing:0.5px;">&#9733; {{store_name}} &#9733;</div>
+<div style="font-size:11px;opacity:.85;margin-top:2px;">Premium Quality &amp; Fast Shipping</div>
 </div>
-<div style="height:3px;background:#14b8a6;"></div>
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;"><tr>
-<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#128666; Fast Shipping</td>
-<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#8635; 30-Day Returns</td>
-<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#128172; Real Support</td>
-<td align="center" style="padding:8px 4px;font-size:10px;color:#475569;">&#9989; Guaranteed</td>
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0fdfa;border-bottom:2px solid #14b8a6;"><tr>
+<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#128666;<br>Fast Ship</td>
+<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#8635;<br>Easy Returns</td>
+<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#128172;<br>Real Support</td>
+<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#9989;<br>Guaranteed</td>
 </tr></table>
+<div style="text-align:center;padding:6px;font-size:10px;">
+<a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">New Arrivals</a>|<a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">Feedback</a>|<a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">Contact</a>
+</div>
 <table width="100%" cellpadding="0" cellspacing="0" style="padding:16px;"><tr>
 <td valign="top" width="58%" style="padding-right:12px;">
 <h2 style="font-size:16px;color:#0f172a;margin:0 0 8px;">{{title}}</h2>
@@ -276,12 +276,14 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:800px;margin:0 au
 </td>
 <td valign="top" width="42%">{{#main_image}}<img src="{{.}}" alt="{{title}}" style="width:100%;border-radius:6px;" />{{/main_image}}</td>
 </tr></table>
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:12px 16px;font-size:11px;color:#64748b;border-top:1px solid #e2e8f0;"><tr>
-<td width="50%" valign="top"><b style="color:#0f172a;">About:</b> Quality products, great service.</td>
-<td width="50%" valign="top"><b style="color:#0f172a;">Shipping:</b> Fast dispatch, every order.</td>
+<table width="100%" cellpadding="0" cellspacing="0" style="font-size:11px;color:#e2e8f0;line-height:1.5;"><tr>
+<td style="background:#0f172a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">ABOUT US</b><br>Welcome to {{store_name}}! We offer great prices on quality products. Our goal is a smooth experience from browsing to delivery — reach out anytime with questions.</td>
 </tr><tr>
-<td width="50%" valign="top" style="padding-top:6px;"><b style="color:#0f172a;">Returns:</b> 30-day policy, hassle-free.</td>
-<td width="50%" valign="top" style="padding-top:6px;"><b style="color:#0f172a;">Support:</b> Here for you, always.</td>
+<td style="background:#134e4a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">SHIPPING</b><br>We work hard to get every order to you as quickly as possible, with tracking provided on every order. International orders may be subject to customs duties.</td>
+</tr><tr>
+<td style="background:#0f172a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">RETURNS</b><br>We offer a 30-day return policy on items you are not completely satisfied with — a full refund or exchange, your choice. Just reach out to get started.</td>
+</tr><tr>
+<td style="background:#134e4a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">CUSTOMER SATISFACTION</b><br>Your satisfaction is our top priority. If anything is ever wrong with your order, message us and we will make it right as quickly as possible.</td>
 </tr></table>
 </div>`
 
