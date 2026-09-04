@@ -282,8 +282,32 @@ export function useData(): DataContextValue {
         supabase.from('revisions').select('*').eq('store_id', storeId).order('date', { ascending: false }).limit(50),
       ])
 
-      setListings((listingsRes.data || []).map(mapListingRow))
-      setOrders((ordersRes.data || []).map(mapOrderRow))
+      // Match each order back to the listing it belongs to via the eBay item ID (not ASIN —
+      // many listings have no ASIN at all, e.g. ones synced in from eBay rather than published
+      // through this app, but every listing does have an ebay_id). This gives Sold count and
+      // Last Sale date without depending on listings.sold_count, which nothing ever updates.
+      const rawOrders = ordersRes.data || []
+      const salesByItemId = new Map<string, { count: number; lastDate: string }>()
+      for (const o of rawOrders) {
+        const itemId = (o as unknown as { ebay_item_id?: string | null }).ebay_item_id
+        if (!itemId) continue
+        const date = o.order_date || ''
+        const existing = salesByItemId.get(itemId)
+        if (!existing) {
+          salesByItemId.set(itemId, { count: 1, lastDate: date })
+        } else {
+          existing.count += 1
+          if (date > existing.lastDate) existing.lastDate = date
+        }
+      }
+
+      const mappedListings = (listingsRes.data || []).map(mapListingRow).map(l => {
+        const sale = l.ebayId ? salesByItemId.get(l.ebayId) : undefined
+        return sale ? { ...l, soldCount: sale.count, lastSaleDate: sale.lastDate } : l
+      })
+
+      setListings(mappedListings)
+      setOrders(rawOrders.map(mapOrderRow))
 
       const bulkRunsRes = await supabase.from('bulk_runs').select('*').eq('store_id', storeId).order('created_at', { ascending: false })
       const bulkRunRows = bulkRunsRes.data || []
