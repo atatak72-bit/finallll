@@ -488,7 +488,9 @@ export default function Listings() {
                     <td className="px-2.5 py-2 text-right text-slate-700">{listing.soldCount}</td>
                     <td className="px-2.5 py-2"><ListingStatusPill status={listing.status} /></td>
                     <td className="px-2.5 py-2 text-slate-500 text-xs">{timeAgo(listing.listedDate)}</td>
-                    <td className="px-2.5 py-2 text-slate-400 text-xs">Never</td>
+                    <td className="px-2.5 py-2 text-slate-500 text-xs">
+                      {listing.lastSaleDate ? timeAgo(listing.lastSaleDate) : <span className="text-slate-400">Never</span>}
+                    </td>
                     <td className="px-2.5 py-2 text-slate-500 text-xs">
                       {listing.checkedDate ? timeAgo(listing.checkedDate) : <span className="text-slate-400">Not yet</span>}
                     </td>
