@@ -77,7 +77,7 @@ function ActionMenu({
           <button
             key={idx}
             onClick={() => { item.onClick(); onClose() }}
-            className="w-full text-left px-3 py-2.5 flex items-start gap-3 hover:bg-slate-50 transition-colors"
+            className="w-full text-left px-2.5 py-2 flex items-start gap-3 hover:bg-slate-50 transition-colors"
           >
             <span className={cn(
               'w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5',
@@ -393,39 +393,39 @@ export default function Listings() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
-                  <th className="px-4 py-3 w-10">
+                  <th className="px-2.5 py-2 w-10">
                     <button onClick={toggleSelectAll}>
                       {allSelected ? <CheckSquare className="w-4 h-4 text-brand-600" /> : <Square className="w-4 h-4 text-slate-300" />}
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium">
+                  <th className="px-2.5 py-2 font-medium">
                     <button onClick={() => toggleSort('title')} className="flex items-center gap-1 hover:text-slate-700">
                       Listing <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium">Source</th>
-                  <th className="px-4 py-3 font-medium">Listing</th>
-                  <th className="px-4 py-3 font-medium text-right">Amazon</th>
-                  <th className="px-4 py-3 font-medium text-right">
+                  <th className="px-2.5 py-2 font-medium">Source</th>
+                  <th className="px-2.5 py-2 font-medium">Listing</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Amazon</th>
+                  <th className="px-2.5 py-2 font-medium text-right">
                     <button onClick={() => toggleSort('ebayPrice')} className="flex items-center gap-1 hover:text-slate-700 ml-auto">
                       eBay <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium text-right">Qty</th>
-                  <th className="px-4 py-3 font-medium text-right">
+                  <th className="px-2.5 py-2 font-medium text-right">Qty</th>
+                  <th className="px-2.5 py-2 font-medium text-right">
                     <button onClick={() => toggleSort('soldCount')} className="flex items-center gap-1 hover:text-slate-700 ml-auto">
                       Sold <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">
+                  <th className="px-2.5 py-2 font-medium">Status</th>
+                  <th className="px-2.5 py-2 font-medium">
                     <button onClick={() => toggleSort('listedDate')} className="flex items-center gap-1 hover:text-slate-700">
                       List Date <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium">Last Sale</th>
-                  <th className="px-4 py-3 font-medium">Checked</th>
-                  <th className="px-4 py-3 font-medium text-right">Actions</th>
+                  <th className="px-2.5 py-2 font-medium">Last Sale</th>
+                  <th className="px-2.5 py-2 font-medium">Checked</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -433,21 +433,21 @@ export default function Listings() {
                   const pct = markupPct(listing.ebayPrice, listing.amazonPrice)
                   return (
                   <tr key={listing.id} className="border-b border-slate-100 table-row-hover">
-                    <td className="px-4 py-3">
+                    <td className="px-2.5 py-2">
                       <button onClick={() => toggleSelect(listing.id)}>
                         {selected.includes(listing.id) ? <CheckSquare className="w-4 h-4 text-brand-600" /> : <Square className="w-4 h-4 text-slate-300" />}
                       </button>
                     </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-3">
-                        <img src={listing.image} alt="" className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0" />
-                        <Link to={`/listings/${listing.id}`} className="font-medium text-slate-900 hover:text-brand-600 truncate max-w-xs">
+                    <td className="px-2.5 py-2">
+                      <div className="flex items-center gap-2">
+                        <img src={listing.image} alt="" className="w-7 h-7 rounded-lg object-cover border border-slate-200 shrink-0" />
+                        <Link to={`/listings/${listing.id}`} className="font-medium text-slate-900 hover:text-brand-600 truncate max-w-[130px]">
                           {listing.title}
                         </Link>
-                        {listing.promoted && <span className="badge-info text-xs">Promoted</span>}
+                        {listing.promoted && <span className="badge-info text-xs shrink-0">Promoted</span>}
                       </div>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-2.5 py-2">
                       {listing.asin ? (
                         <a
                           href={`https://www.amazon.com/dp/${listing.asin}`}
@@ -462,7 +462,7 @@ export default function Listings() {
                         <span className="font-mono text-xs text-slate-400">—</span>
                       )}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-2.5 py-2">
                       {listing.ebayId ? (
                         <a
                           href={`https://www.ebay.com/itm/${listing.ebayId}`}
@@ -477,22 +477,22 @@ export default function Listings() {
                         <span className="font-mono text-xs text-slate-400">—</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(listing.amazonPrice)}</td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-2.5 py-2 text-right text-slate-600">{formatCurrency(listing.amazonPrice)}</td>
+                    <td className="px-2.5 py-2 text-right">
                       <div className="font-medium text-slate-900">
                         {formatCurrency(listing.ebayPrice)}
                         {pct && <span className="ml-1 text-xs font-medium text-success-600">({pct})</span>}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-700">{listing.quantity}</td>
-                    <td className="px-4 py-3 text-right text-slate-700">{listing.soldCount}</td>
-                    <td className="px-4 py-3"><ListingStatusPill status={listing.status} /></td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">{timeAgo(listing.listedDate)}</td>
-                    <td className="px-4 py-3 text-slate-400 text-xs">Never</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">
+                    <td className="px-2.5 py-2 text-right text-slate-700">{listing.quantity}</td>
+                    <td className="px-2.5 py-2 text-right text-slate-700">{listing.soldCount}</td>
+                    <td className="px-2.5 py-2"><ListingStatusPill status={listing.status} /></td>
+                    <td className="px-2.5 py-2 text-slate-500 text-xs">{timeAgo(listing.listedDate)}</td>
+                    <td className="px-2.5 py-2 text-slate-400 text-xs">Never</td>
+                    <td className="px-2.5 py-2 text-slate-500 text-xs">
                       {listing.checkedDate ? timeAgo(listing.checkedDate) : <span className="text-slate-400">Not yet</span>}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-2.5 py-2">
                       <div className="flex items-center justify-end gap-1">
                         <Link to={`/listings/${listing.id}`} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition">
                           <Pencil className="w-4 h-4" />
