@@ -20,7 +20,7 @@ export interface Listing {
   listedDate: string
   soldCount: number
   promoted: boolean
-  checkedDate: string | null
+  checkedDate?: string | null
 }
 export interface Order {
   id: string
