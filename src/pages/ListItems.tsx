@@ -535,6 +535,26 @@ export default function ListItems() {
         aspects: aspects && Object.keys(aspects).length > 0 ? aspects : undefined,
       })
 
+      // Promoted Listings was being collected in the UI but never actually sent anywhere —
+      // this is what actually turns it on for the listing that was just published. Best-effort:
+      // eBay's own Promoted Listings eligibility can still decline this even when the call
+      // succeeds, so a failure here never fails the whole publish (the listing is already live).
+      if (promoted && listingId) {
+        try {
+          const { data: adSettings } = await supabase
+            .from('store_promoted_settings')
+            .select('default_ad_rate')
+            .eq('store_id', singleStore.id)
+            .maybeSingle()
+          const adRate = Number(adSettings?.default_ad_rate) || 3
+          await supabase.functions.invoke('ebay-promote-listing', {
+            body: { storeId: singleStore.id, listingId, adRate },
+          })
+        } catch {
+          // Non-fatal — the listing itself published successfully either way.
+        }
+      }
+
       setPublishSuccess(`Listed on eBay at ${formatCurrency(priceToUse)}`)
 
       setTimeout(() => {
