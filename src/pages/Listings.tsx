@@ -10,7 +10,7 @@ import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
-import { formatCurrency, formatDate, cn } from '../lib/utils'
+import { formatCurrency, cn } from '../lib/utils'
 import type { ListingStatus } from '../data/types'
 
 const PAGE_SIZE = 100
@@ -20,6 +20,34 @@ function markupPct(ebayPrice: number, amazonPrice: number): string | null {
   const pct = ((ebayPrice - amazonPrice) / amazonPrice) * 100
   const sign = pct >= 0 ? '+' : ''
   return `${sign}${pct.toFixed(0)}%`
+}
+
+// "6 days ago" / "1 hour ago" style relative time, used for List Date.
+function timeAgo(dateInput: string | number | Date): string {
+  const date = new Date(dateInput)
+  if (isNaN(date.getTime())) return '—'
+  const diffMs = Date.now() - date.getTime()
+  const diffSec = Math.floor(diffMs / 1000)
+  if (diffSec < 60) return 'Just now'
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin} min ago`
+  const diffHour = Math.floor(diffMin / 60)
+  if (diffHour < 24) return `${diffHour} hour${diffHour === 1 ? '' : 's'} ago`
+  const diffDay = Math.floor(diffHour / 24)
+  return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`
+}
+
+// Same badge style as the shared StatusBadge, except "active" reads as "Synced" —
+// only in this table, so other screens that use StatusBadge are untouched.
+function ListingStatusPill({ status }: { status: ListingStatus }) {
+  if (status === 'active') {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success-50 text-success-700">
+        <span className="w-1.5 h-1.5 rounded-full bg-success-500" /> Synced
+      </span>
+    )
+  }
+  return <StatusBadge status={status} />
 }
 
 // Renders a small, polished action menu anchored to a trigger button, drawn via a portal
@@ -375,8 +403,8 @@ export default function Listings() {
                       Listing <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
-                  <th className="px-4 py-3 font-medium">ASIN</th>
-                  <th className="px-4 py-3 font-medium">Listing ID</th>
+                  <th className="px-4 py-3 font-medium">Source</th>
+                  <th className="px-4 py-3 font-medium">Listing</th>
                   <th className="px-4 py-3 font-medium text-right">Amazon</th>
                   <th className="px-4 py-3 font-medium text-right">
                     <button onClick={() => toggleSort('ebayPrice')} className="flex items-center gap-1 hover:text-slate-700 ml-auto">
@@ -392,9 +420,11 @@ export default function Listings() {
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">
                     <button onClick={() => toggleSort('listedDate')} className="flex items-center gap-1 hover:text-slate-700">
-                      Listed <ArrowUpDown className="w-3 h-3" />
+                      List Date <ArrowUpDown className="w-3 h-3" />
                     </button>
                   </th>
+                  <th className="px-4 py-3 font-medium">Last Sale</th>
+                  <th className="px-4 py-3 font-medium">Checked</th>
                   <th className="px-4 py-3 font-medium text-right">Actions</th>
                 </tr>
               </thead>
@@ -418,10 +448,34 @@ export default function Listings() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      <span className="font-mono text-xs text-slate-500">{listing.asin || '—'}</span>
+                      {listing.asin ? (
+                        <a
+                          href={`https://www.amazon.com/dp/${listing.asin}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={e => e.stopPropagation()}
+                          className="font-mono text-xs text-brand-600 hover:underline"
+                        >
+                          {listing.asin}
+                        </a>
+                      ) : (
+                        <span className="font-mono text-xs text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
-                      <span className="font-mono text-xs text-slate-500">{listing.ebayId || '—'}</span>
+                      {listing.ebayId ? (
+                        <a
+                          href={`https://www.ebay.com/itm/${listing.ebayId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={e => e.stopPropagation()}
+                          className="font-mono text-xs text-brand-600 hover:underline"
+                        >
+                          {listing.ebayId}
+                        </a>
+                      ) : (
+                        <span className="font-mono text-xs text-slate-400">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right text-slate-600">{formatCurrency(listing.amazonPrice)}</td>
                     <td className="px-4 py-3 text-right">
@@ -432,8 +486,12 @@ export default function Listings() {
                     </td>
                     <td className="px-4 py-3 text-right text-slate-700">{listing.quantity}</td>
                     <td className="px-4 py-3 text-right text-slate-700">{listing.soldCount}</td>
-                    <td className="px-4 py-3"><StatusBadge status={listing.status} /></td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">{formatDate(listing.listedDate)}</td>
+                    <td className="px-4 py-3"><ListingStatusPill status={listing.status} /></td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">{timeAgo(listing.listedDate)}</td>
+                    <td className="px-4 py-3 text-slate-400 text-xs">Never</td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">
+                      {listing.checkedDate ? timeAgo(listing.checkedDate) : <span className="text-slate-400">Not yet</span>}
+                    </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-end gap-1">
                         <Link to={`/listings/${listing.id}`} className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-500 hover:text-slate-700 transition">
