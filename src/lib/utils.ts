@@ -254,7 +254,7 @@ export function renderListingTemplate(template: string, data: Record<string, unk
 // The default template used for any store that hasn't saved a custom one yet in
 // Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
 // template produces a correctly-branded listing on every connected store automatically.
-export const DEFAULT_LISTING_TEMPLATE = `<div style="max-width:800px;margin:0 auto;font-family:Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;background:#fff;user-select:none;-webkit-user-select:none;">
+export const DEFAULT_LISTING_TEMPLATE = `<div style="width:100%;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;background:#fff;user-select:none;-webkit-user-select:none;">
 <div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:16px;text-align:center;color:#fff;">
 <div style="font-size:17px;font-weight:800;letter-spacing:0.5px;">&#9733; {{store_name}} &#9733;</div>
 <div style="font-size:11px;opacity:.85;margin-top:2px;">Premium Quality &amp; Fast Shipping</div>
