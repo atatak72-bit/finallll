@@ -21,6 +21,7 @@ export interface Listing {
   soldCount: number
   promoted: boolean
   checkedDate?: string | null
+  lastSaleDate?: string | null
 }
 export interface Order {
   id: string
