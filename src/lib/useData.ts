@@ -151,6 +151,10 @@ function mapListingRow(l: ListingRow): Listing {
     listedDate: l.listed_date || new Date().toISOString(),
     soldCount: l.sold_count || 0,
     promoted: l.promoted || false,
+    // last_stock_check comes from ebay-stock-sync's periodic price/quantity checks.
+    // Cast used in case the local ListingRow type hasn't been updated to declare this
+    // column yet — the column itself already exists on the table (select('*') returns it).
+    checkedDate: (l as unknown as { last_stock_check?: string | null }).last_stock_check || null,
   }
 }
 
