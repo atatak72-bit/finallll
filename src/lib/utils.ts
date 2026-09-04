@@ -254,37 +254,39 @@ export function renderListingTemplate(template: string, data: Record<string, unk
 // The default template used for any store that hasn't saved a custom one yet in
 // Settings > Templates. Uses {{store_name}} (never a hardcoded brand) so the exact same
 // template produces a correctly-branded listing on every connected store automatically.
-export const DEFAULT_LISTING_TEMPLATE = `<div style="width:100%;box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;color:#1e293b;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;background:#fff;user-select:none;-webkit-user-select:none;">
-<div style="background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:16px;text-align:center;color:#fff;">
-<div style="font-size:17px;font-weight:800;letter-spacing:0.5px;">&#9733; {{store_name}} &#9733;</div>
-<div style="font-size:11px;opacity:.85;margin-top:2px;">Premium Quality &amp; Fast Shipping</div>
+export const DEFAULT_LISTING_TEMPLATE = `<div style="user-select:none;-webkit-user-select:none;">
+<style>.a{font-family:Arial,sans-serif;max-width:1000px;margin:0 auto;background:#fff;color:#333}.b{background:linear-gradient(135deg,#0f172a,#1e3a5f);padding:18px;text-align:center;color:#fff}.b b{font-size:19px}.b span{display:block;font-size:11px;opacity:.85;margin-top:3px}.c{display:flex;flex-wrap:wrap;justify-content:center;background:#0d3f7a}.c a{padding:10px 14px;color:#fff;text-decoration:none;font-size:11px;font-weight:700;text-transform:uppercase}.d{display:flex;flex-wrap:wrap;justify-content:center;gap:18px;background:#f0fdfa;padding:10px;font-size:10px;color:#0f172a}.e{padding:20px}.f{display:flex;gap:24px;flex-wrap:wrap}.g{flex:1;min-width:240px}.h{flex:0 0 280px;border:1px solid #e2e2e2;border-radius:8px;padding:8px}.h img{display:block;width:100%;max-height:260px;object-fit:contain}.i{font-size:17px;font-weight:700;color:#17233f;margin:0 0 14px}.j{font-size:14px;font-weight:600;color:#17233f;border-bottom:1px solid #ddd;padding-bottom:6px;margin:14px 0 8px}.k{padding-left:18px;margin:0;font-size:12px;line-height:1.7}.l{font-size:12px;line-height:1.7}.m{background:#0d3f7a;color:#fff;font-size:12px;font-weight:700;text-transform:uppercase;padding:8px 20px}.n{font-size:12px;line-height:1.6;color:#444;padding:12px 20px 18px}.o{text-align:center;padding:10px 0 0;font-size:11px;color:#666;border-top:1px solid #eee;margin:12px 20px}</style>
+<div class="a">
+<div class="b"><b>&#9733; {{store_name}}</b><span>Premium Quality &amp; Fast Shipping</span></div>
+<div class="c">
+<a  href="https://stores.ebay.com/{{store_name}}">Store</a>
+<a  href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10">New Arrivals</a>
+<a  href="https://feedback.ebay.com/ws/eBayISAPI.dll?ViewFeedback2&userid={{store_name}}">Feedback</a>
+<a  href="https://contact.ebay.com/ws/eBayISAPI.dll?FindAnswers&frm=284&requested={{store_name}}">Contact</a>
 </div>
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#f0fdfa;border-bottom:2px solid #14b8a6;"><tr>
-<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#128666;<br>Fast Ship</td>
-<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#8635;<br>Easy Returns</td>
-<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#128172;<br>Real Support</td>
-<td align="center" style="padding:6px 2px;font-size:10px;color:#0f172a;">&#9989;<br>Guaranteed</td>
-</tr></table>
-<div style="text-align:center;padding:6px;font-size:10px;">
-<a href="https://www.ebay.com/sch/i.html?_ssn={{store_name}}&_sop=10" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">New Arrivals</a>|<a href="https://www.ebay.com/fdbk/feedback_profile/{{store_name}}" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">Feedback</a>|<a href="https://contact.ebay.com/ws/eBayISAPI.dll?ContactUserNextGen&requested={{store_name}}" target="_blank" style="color:#0f766e;text-decoration:none;margin:0 6px;">Contact</a>
+<div class="d">
+<span>&#128666; Fast Shipping</span><span>&#8635; 30-Day Returns</span><span>&#128172; Real Support</span><span>&#9989; Guaranteed</span>
 </div>
-<table width="100%" cellpadding="0" cellspacing="0" style="padding:16px;"><tr>
-<td valign="top" width="58%" style="padding-right:12px;">
-<h2 style="font-size:16px;color:#0f172a;margin:0 0 8px;">{{title}}</h2>
-<ul style="margin:6px 0;padding-left:16px;font-size:12px;color:#334155;line-height:1.5;">{{#feature_bullets}}<li>{{.}}</li>{{/feature_bullets}}</ul>
-{{#product_description}}<p style="font-size:12px;color:#334155;line-height:1.5;margin:8px 0 0;">{{.}}</p>{{/product_description}}
-</td>
-<td valign="top" width="42%">{{#main_image}}<img src="{{.}}" alt="{{title}}" style="width:100%;border-radius:6px;" />{{/main_image}}</td>
-</tr></table>
-<table width="100%" cellpadding="0" cellspacing="0" style="font-size:11px;color:#e2e8f0;line-height:1.5;"><tr>
-<td style="background:#0f172a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">ABOUT US</b><br>Welcome to {{store_name}}! We offer great prices on quality products. Our goal is a smooth experience from browsing to delivery — reach out anytime with questions.</td>
-</tr><tr>
-<td style="background:#134e4a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">SHIPPING</b><br>We work hard to get every order to you as quickly as possible, with tracking provided on every order. International orders may be subject to customs duties.</td>
-</tr><tr>
-<td style="background:#0f172a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">RETURNS</b><br>We offer a 30-day return policy on items you are not completely satisfied with — a full refund or exchange, your choice. Just reach out to get started.</td>
-</tr><tr>
-<td style="background:#134e4a;padding:8px 16px;"><b style="color:#fff;letter-spacing:0.5px;">CUSTOMER SATISFACTION</b><br>Your satisfaction is our top priority. If anything is ever wrong with your order, message us and we will make it right as quickly as possible.</td>
-</tr></table>
+<div class="e">
+<div class="f">
+<div class="g">
+<h1 class="i">{{title}}</h1>
+<div class="j">Key Features</div><ul class="k">{{#feature_bullets}}<li>{{.}}</li>{{/feature_bullets}}</ul>
+{{#product_description}}<div class="j">Description</div><div class="l">{{.}}</div>{{/product_description}}
+</div>
+<div class="h">{{#main_image}}<img src="{{.}}">{{/main_image}}</div>
+</div>
+</div>
+<div class="m">About Us</div>
+<div class="n">Welcome to {{store_name}}! We offer great prices on quality products across a wide range of categories. Our goal is a smooth experience from browsing to delivery — feel free to check out our other listings or reach out anytime with questions.</div>
+<div class="m">Shipping</div>
+<div class="n">We work hard to get every order to you as quickly as possible, with tracking provided on every order. International orders may be subject to customs duties depending on your country.</div>
+<div class="m">Returns</div>
+<div class="n">We offer a 30-day return policy on items you're not completely satisfied with. You have the option of a full refund or an exchange — just reach out to us to get started.</div>
+<div class="m">Customer Satisfaction</div>
+<div class="n">Your satisfaction is our top priority. If there's ever a problem with your order, please message us and we'll make it right as quickly as possible.</div>
+<div class="o">Sold by {{store_name}}</div>
+</div>
 </div>`
 
 
