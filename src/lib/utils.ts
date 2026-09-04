@@ -294,21 +294,34 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="width:100%;box-sizing:borde
 // risk eBay rejecting the listing, or worse, truncating raw HTML mid-tag), this measures
 // the template's fixed overhead first and trims only the flexible part — the actual
 // product_description text — to whatever room is left. Bullets/title/images stay intact.
+function truncateWordSafe(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text
+  let t = text.slice(0, maxLen)
+  const lastSpace = t.lastIndexOf(' ')
+  if (lastSpace > maxLen * 0.6) t = t.slice(0, lastSpace)
+  return t.trim()
+}
+
 export function fitDescriptionToBudget(
   template: string,
   data: Record<string, unknown>,
   maxTotal = 4000,
 ): string {
-  const withoutDesc = renderListingTemplate(template, { ...data, product_description: '' })
   const margin = 50
+
+  // Bullets themselves (not just the description) can be arbitrarily long/numerous — real
+  // Amazon feature bullets are often full sentences, and several of them can already exceed
+  // eBay's 4000-char cap on their own, before any description text is even added. Cap them
+  // first so the "fixed" part of the template (everything except the description) can never
+  // run away on its own.
+  const rawBullets = Array.isArray(data.feature_bullets) ? (data.feature_bullets as unknown[]).map(String) : []
+  const cappedBullets = rawBullets.slice(0, 6).map(b => truncateWordSafe(b, 110))
+  const safeData = { ...data, feature_bullets: cappedBullets }
+
+  const withoutDesc = renderListingTemplate(template, { ...safeData, product_description: '' })
   const budget = Math.max(0, maxTotal - withoutDesc.length - margin)
   const rawDesc = String(data.product_description || '')
-  let trimmedDesc = rawDesc
-  if (rawDesc.length > budget) {
-    trimmedDesc = rawDesc.slice(0, budget)
-    const lastSpace = trimmedDesc.lastIndexOf(' ')
-    if (lastSpace > budget * 0.7) trimmedDesc = trimmedDesc.slice(0, lastSpace)
-    trimmedDesc = trimmedDesc.trim()
-  }
-  return renderListingTemplate(template, { ...data, product_description: trimmedDesc })
+  const trimmedDesc = rawDesc.length > budget ? truncateWordSafe(rawDesc, budget) : rawDesc
+
+  return renderListingTemplate(template, { ...safeData, product_description: trimmedDesc })
 }
