@@ -33,6 +33,7 @@ export interface PublishListingPayload {
     returnPolicyId?: string
   }
   aspects?: Record<string, string[]>
+  amazonPrice?: number
 }
 
 export interface BulkRunItem {
@@ -563,6 +564,7 @@ export function useData(): DataContextValue {
             categoryId: run.category_id || aiDetectedCategoryId || undefined,
             policyOverrides,
             aspects,
+            amazonPrice: product.price,
           })
 
           // Promoted Listings: best-effort — eBay eligibility (sales history, category, etc.)
