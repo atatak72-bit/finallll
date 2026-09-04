@@ -1,5 +1,4 @@
 export type ListingStatus = 'active' | 'draft' | 'ended' | 'unknown' | 'out_of_stock'
-
 export interface Store {
   id: string
   nickname: string
@@ -7,7 +6,6 @@ export interface Store {
   connected: boolean
   active: boolean
 }
-
 export interface Listing {
   id: string
   ebayId: string
@@ -22,8 +20,8 @@ export interface Listing {
   listedDate: string
   soldCount: number
   promoted: boolean
+  checkedDate: string | null
 }
-
 export interface Order {
   id: string
   storeId: string
@@ -48,7 +46,6 @@ export interface Order {
   trackingCarrier: string | null
   notes: string
 }
-
 export interface Conversation {
   id: string
   buyerName: string
@@ -59,14 +56,12 @@ export interface Conversation {
   unread: boolean
   messages: Message[]
 }
-
 export interface Message {
   id: string
   from: 'buyer' | 'seller'
   body: string
   date: string
 }
-
 export interface Revision {
   id: string
   listingTitle: string
@@ -76,7 +71,6 @@ export interface Revision {
   reason: string
   date: string
 }
-
 export interface BulkRun {
   id: string
   name: string
@@ -88,7 +82,6 @@ export interface BulkRun {
   date: string
   items: BulkRunItem[]
 }
-
 export interface BulkRunItem {
   id: string
   asin: string
@@ -96,7 +89,6 @@ export interface BulkRunItem {
   status: 'success' | 'failed' | 'pending'
   error?: string
 }
-
 export interface Draft {
   id: string
   asin: string
@@ -106,7 +98,6 @@ export interface Draft {
   savedDate: string
   bulkRunId?: string
 }
-
 export interface Invoice {
   id: string
   date: string
@@ -114,7 +105,6 @@ export interface Invoice {
   plan: string
   status: 'paid' | 'open' | 'void'
 }
-
 export interface TeamMember {
   id: string
   name: string
@@ -122,7 +112,6 @@ export interface TeamMember {
   role: 'owner' | 'va'
   joinedDate: string
 }
-
 export interface AmazonAccount {
   id: string
   email: string
