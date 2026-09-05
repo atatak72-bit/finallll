@@ -32,8 +32,11 @@ export interface Order {
   listingTitle: string
   listingImage: string
   asin: string
+  ebayItemId?: string
+  quantity?: number
   ebayPrice: number
   amazonCost: number
+  orderEarnings?: number
   profit: number
   status: 'pending' | 'shipped' | 'delivered' | 'cancelled'
   orderDate: string
