@@ -154,6 +154,7 @@ function IdPill({
 }) {
   const [open, setOpen] = useState(false)
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null)
+  const display = value && value.length > 7 ? `${value.slice(0, 7)}...` : (value || '—')
 
   return (
     <span className="inline-flex items-stretch rounded-full border border-slate-200 bg-white shadow-sm overflow-hidden">
@@ -163,12 +164,12 @@ function IdPill({
           target="_blank"
           rel="noopener noreferrer"
           onClick={e => e.stopPropagation()}
-          className="font-mono text-xs text-slate-700 hover:text-brand-600 hover:bg-slate-50 truncate max-w-[90px] pl-2.5 pr-1.5 py-1 flex items-center transition"
+          className="font-mono text-xs text-slate-700 hover:text-brand-600 hover:bg-slate-50 pl-2.5 pr-1.5 py-1 flex items-center transition"
         >
-          {value}
+          {display}
         </a>
       ) : (
-        <span className="font-mono text-xs text-slate-400 truncate max-w-[90px] pl-2.5 pr-1.5 py-1 flex items-center">{value || '—'}</span>
+        <span className="font-mono text-xs text-slate-400 pl-2.5 pr-1.5 py-1 flex items-center">{display}</span>
       )}
       <button
         onClick={(e) => {
