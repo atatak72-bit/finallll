@@ -125,6 +125,7 @@ export interface DataContextValue {
   endListing: (storeId: string, listingId: string, sku?: string) => Promise<void>
   removeListingLocal: (listingId: string) => Promise<void>
   syncAllEbayListings: (storeId: string) => Promise<{ synced: number; failed: number; totalFound: number }>
+  updateOrderNotes: (orderId: string, notes: string) => Promise<void>
 }
 
 function mapTokenToStore(t: EbayTokenRow): Store {
@@ -169,8 +170,11 @@ function mapOrderRow(o: OrderRow): Order {
     listingTitle: o.listing_title || '',
     listingImage: o.listing_image || '',
     asin: o.asin || '',
+    ebayItemId: (o as unknown as { ebay_item_id?: string | null }).ebay_item_id || '',
+    quantity: (o as unknown as { quantity?: number | null }).quantity || 1,
     ebayPrice: Number(o.ebay_price) || 0,
     amazonCost: Number(o.amazon_cost) || 0,
+    orderEarnings: Number((o as unknown as { order_earnings?: number | null }).order_earnings) || 0,
     profit: Number(o.profit) || 0,
     status: (o.status as Order['status']) || 'pending',
     orderDate: o.order_date || new Date().toISOString(),
@@ -734,6 +738,12 @@ export function useData(): DataContextValue {
     return { synced: data.synced || 0, failed: data.failed || 0, totalFound: data.totalFound || 0 }
   }, [refresh])
 
+  const updateOrderNotes = useCallback(async (orderId: string, notes: string) => {
+    const { error } = await supabase.from('orders').update({ notes }).eq('id', orderId)
+    if (error) throw new Error(error.message)
+    setOrders(prev => prev.map(o => o.id === orderId ? { ...o, notes } : o))
+  }, [])
+
   const updateListing = useCallback(async (storeId: string, payload: UpdateListingPayload) => {
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/update-listing`
     const res = await fetch(syncUrl, {
@@ -805,5 +815,5 @@ export function useData(): DataContextValue {
     refresh()
   }, [refresh])
 
-  return { stores, listings, orders, conversations, revisions, loading, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings }
+  return { stores, listings, orders, conversations, revisions, loading, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings, updateOrderNotes }
 }
