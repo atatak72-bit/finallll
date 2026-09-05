@@ -622,13 +622,6 @@ interface PricingTier {
   fixProfit: number
 }
 
-const DEFAULT_TIERS: Omit<PricingTier, 'id'>[] = [
-  { min: 0, max: 25, profitPct: 27, fixProfit: 0.30 },
-  { min: 25, max: 50, profitPct: 25, fixProfit: 0.30 },
-  { min: 50, max: 100, profitPct: 23, fixProfit: 0.30 },
-  { min: 100, max: 999999, profitPct: 20, fixProfit: 0.30 },
-]
-
 const FEE_PRESETS = [
   { label: 'United States', flag: 'US', pct: 13.25, fixed: 0.30 },
   { label: 'Turkey', flag: 'TR', pct: 17.88, fixed: 0.36 },
@@ -684,17 +677,18 @@ export function PricingSection() {
         setExampleSource(10)
       }
 
-      if (tiersRes.data && tiersRes.data.length > 0) {
-        setTiers(tiersRes.data.map(r => ({
-          id: r.id,
-          min: Number(r.min_price) || 0,
-          max: Number(r.max_price) || 999999,
-          profitPct: Number(r.profit_pct) || 20,
-          fixProfit: Number(r.fixed_profit) || 0,
-        })))
-      } else {
-        setTiers(DEFAULT_TIERS.map(t => ({ ...t, id: genId() })))
-      }
+      // No auto-filled defaults here on purpose: a brand-new store starts with ZERO profit
+      // ranges, not a pre-populated 4-tier example. Pricing must be something the person sets
+      // deliberately per store, never inherited or assumed — this is what previously let a
+      // stray "27" meant for the profit column end up looking like it belonged to the eBay
+      // fee column instead, since both areas were pre-filled with plausible-looking numbers.
+      setTiers((tiersRes.data || []).map(r => ({
+        id: r.id,
+        min: Number(r.min_price) || 0,
+        max: Number(r.max_price) || 999999,
+        profitPct: Number(r.profit_pct) || 20,
+        fixProfit: Number(r.fixed_profit) || 0,
+      })))
 
       const matchedPreset = FEE_PRESETS.find(p =>
         Number(p.pct) === Number(settingsRes.data?.ebay_percentage_fee) &&
@@ -770,9 +764,11 @@ export function PricingSection() {
       const { error: delErr } = await supabase.from('pricing_rules').delete().eq('store_id', sid)
       if (delErr) throw new Error(delErr.message)
 
-      const insertRows = tierRows.map(r => ({ ...r, store_id: sid }))
-      const { error: insErr } = await supabase.from('pricing_rules').insert(insertRows)
-      if (insErr) throw new Error(insErr.message)
+      if (tierRows.length > 0) {
+        const insertRows = tierRows.map(r => ({ ...r, store_id: sid }))
+        const { error: insErr } = await supabase.from('pricing_rules').insert(insertRows)
+        if (insErr) throw new Error(insErr.message)
+      }
     }
   }
 
@@ -832,7 +828,7 @@ export function PricingSection() {
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">Range Repricing</h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Tiered markup by Amazon source price. Each tier's "From" auto-fills from the previous tier's "To".
+            Tiered markup by Amazon source price, specific to <span className="font-medium text-slate-700">{activeStore?.ebayUsername || activeStore?.nickname || 'this store'}</span> only. Each tier's "From" auto-fills from the previous tier's "To".
           </p>
         </div>
         <div className="card-body space-y-4">
@@ -840,82 +836,90 @@ export function PricingSection() {
             <div className="p-6 text-center text-sm text-slate-500">Loading pricing tiers…</div>
           ) : (
             <>
-              {/* Header row (desktop) */}
-              <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 px-1">
-                <label className="label">From ($)</label>
-                <label className="label">To ($)</label>
-                <label className="label">Profit (%)</label>
-                <label className="label">Fix profit ($)</label>
-                <span className="w-9" />
-              </div>
-
-              {tiers.map((tier, i) => {
-                const preview = calculateEbayPrice(
-                  tier.min + (tier.max - tier.min) / 2,
-                  [{ min: tier.min, max: tier.max, profitPct: tier.profitPct, fixProfit: tier.fixProfit }],
-                  eBayFeePct,
-                  eBayFixedFee,
-                  pricingEnabled,
-                )
-                const previewCost = tier.min + (tier.max - tier.min) / 2
-
-                return (
-                  <div key={tier.id} className="space-y-1">
-                    <div className="grid grid-cols-2 md:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 items-end">
-                      <div>
-                        <label className="label md:hidden">From ($)</label>
-                        <input
-                          className="input"
-                          type="number"
-                          value={tier.min}
-                          disabled={i === 0}
-                          onChange={e => updateTier(tier.id, { min: +e.target.value })}
-                        />
-                      </div>
-                      <div>
-                        <label className="label md:hidden">To ($)</label>
-                        <input
-                          className="input"
-                          type="number"
-                          value={tier.max}
-                          onChange={e => updateTier(tier.id, { max: +e.target.value })}
-                        />
-                      </div>
-                      <div>
-                        <label className="label md:hidden">Profit (%)</label>
-                        <input
-                          className="input"
-                          type="number"
-                          step="0.01"
-                          value={tier.profitPct}
-                          onChange={e => updateTier(tier.id, { profitPct: +e.target.value })}
-                        />
-                      </div>
-                      <div>
-                        <label className="label md:hidden">Fix profit ($)</label>
-                        <input
-                          className="input"
-                          type="number"
-                          step="0.01"
-                          value={tier.fixProfit}
-                          onChange={e => updateTier(tier.id, { fixProfit: +e.target.value })}
-                        />
-                      </div>
-                      <button
-                        onClick={() => deleteTier(tier.id)}
-                        disabled={tiers.length <= 1}
-                        className="btn-ghost text-error-600 hover:bg-error-50 mb-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                        title="Remove range"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    <p className="text-xs text-slate-400 pl-1">
-                      ≈ a {formatCurrency(previewCost)} item in this range lists at {formatCurrency(preview.finalPrice)}
-                    </p>
+              {tiers.length === 0 ? (
+                <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center">
+                  <p className="text-sm text-slate-500">No profit ranges set up yet for this store.</p>
+                  <p className="text-xs text-slate-400 mt-1">Add at least one range below — nothing is pre-filled, so pricing always stays specific to this one store.</p>
+                </div>
+              ) : (
+                <>
+                  {/* Header row (desktop) */}
+                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 px-1">
+                    <label className="label">From ($)</label>
+                    <label className="label">To ($)</label>
+                    <label className="label">Profit (%)</label>
+                    <label className="label">Fix profit ($)</label>
+                    <span className="w-9" />
                   </div>
-                )
-              })}
+
+                  {tiers.map((tier, i) => {
+                    const preview = calculateEbayPrice(
+                      tier.min + (tier.max - tier.min) / 2,
+                      [{ min: tier.min, max: tier.max, profitPct: tier.profitPct, fixProfit: tier.fixProfit }],
+                      eBayFeePct,
+                      eBayFixedFee,
+                      pricingEnabled,
+                    )
+                    const previewCost = tier.min + (tier.max - tier.min) / 2
+
+                    return (
+                      <div key={tier.id} className="space-y-1">
+                        <div className="grid grid-cols-2 md:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 items-end">
+                          <div>
+                            <label className="label md:hidden">From ($)</label>
+                            <input
+                              className="input"
+                              type="number"
+                              value={tier.min}
+                              disabled={i === 0}
+                              onChange={e => updateTier(tier.id, { min: +e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <label className="label md:hidden">To ($)</label>
+                            <input
+                              className="input"
+                              type="number"
+                              value={tier.max}
+                              onChange={e => updateTier(tier.id, { max: +e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <label className="label md:hidden">Profit (%)</label>
+                            <input
+                              className="input"
+                              type="number"
+                              step="0.01"
+                              value={tier.profitPct}
+                              onChange={e => updateTier(tier.id, { profitPct: +e.target.value })}
+                            />
+                          </div>
+                          <div>
+                            <label className="label md:hidden">Fix profit ($)</label>
+                            <input
+                              className="input"
+                              type="number"
+                              step="0.01"
+                              value={tier.fixProfit}
+                              onChange={e => updateTier(tier.id, { fixProfit: +e.target.value })}
+                            />
+                          </div>
+                          <button
+                            onClick={() => deleteTier(tier.id)}
+                            className="btn-ghost text-error-600 hover:bg-error-50 mb-0.5"
+                            title="Remove range"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <p className="text-xs text-slate-400 pl-1">
+                          ≈ a {formatCurrency(previewCost)} item in this range lists at {formatCurrency(preview.finalPrice)}
+                        </p>
+                      </div>
+                    )
+                  })}
+                </>
+              )}
               <button onClick={addTier} className="btn-secondary text-sm">
                 <Plus className="w-4 h-4" /> Add range
               </button>
@@ -929,7 +933,7 @@ export function PricingSection() {
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">eBay Fees</h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Applied after profit: price = (source + profit) / (1 − fee% × 0.01) + fixed fee.
+            Applied after profit: price = (source + profit) / (1 − fee% × 0.01) + fixed fee. This is eBay's cut, not your profit margin above — double-check you're editing the right box.
           </p>
         </div>
         <div className="card-body space-y-5">
@@ -958,7 +962,7 @@ export function PricingSection() {
           {/* Editable inputs */}
           <div className="grid grid-cols-2 gap-4 max-w-md">
             <div>
-              <label className="label">Percentage fee (%)</label>
+              <label className="label">eBay percentage fee (%) — not your profit</label>
               <input
                 className="input"
                 type="number"
@@ -968,7 +972,7 @@ export function PricingSection() {
               />
             </div>
             <div>
-              <label className="label">Fixed fee ($)</label>
+              <label className="label">eBay fixed fee ($)</label>
               <input
                 className="input"
                 type="number"
@@ -999,16 +1003,18 @@ export function PricingSection() {
             />
           </div>
           <div className="rounded-xl bg-gradient-to-br from-brand-50 to-slate-50 p-4">
-            {pricingEnabled ? (
+            {!pricingEnabled ? (
+              <p className="text-sm text-slate-700">
+                Pricing is disabled. A <span className="font-semibold text-slate-900">{formatCurrency(exampleSource)}</span> Amazon item would list at{' '}
+                <span className="text-lg font-bold text-slate-700">{formatCurrency(exampleSource)}</span> on eBay — no markup, no fees added.
+              </p>
+            ) : tiers.length === 0 ? (
+              <p className="text-sm text-slate-700">Add at least one profit range above to see a live example.</p>
+            ) : (
               <p className="text-sm text-slate-700">
                 A <span className="font-semibold text-slate-900">{formatCurrency(exampleSource)}</span> Amazon item would list at{' '}
                 <span className="text-lg font-bold text-brand-700">{formatCurrency(calc.finalPrice)}</span> on eBay — about{' '}
                 <span className="font-semibold text-success-600">{formatCurrency(calc.profit)}</span> profit before eBay's own cut.
-              </p>
-            ) : (
-              <p className="text-sm text-slate-700">
-                Pricing is disabled. A <span className="font-semibold text-slate-900">{formatCurrency(exampleSource)}</span> Amazon item would list at{' '}
-                <span className="text-lg font-bold text-slate-700">{formatCurrency(exampleSource)}</span> on eBay — no markup, no fees added.
               </p>
             )}
             {calc.tier && (
