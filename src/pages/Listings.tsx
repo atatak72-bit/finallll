@@ -135,15 +135,19 @@ function UsFlagBadge() {
   )
 }
 
-// Renders an ID (ASIN or eBay item ID) as a proper bordered/shadowed chip button with Copy ID /
-// Change ID actions, matching the reference project's Source/Listing columns.
+// Renders an ID (ASIN or eBay item ID) as a bordered chip split into two zones: the ID text
+// itself is a real link out to the Amazon/eBay product page, while the badge+flag portion is a
+// separate button that opens the Copy ID / Change ID menu — so both actions stay reachable
+// without one click target fighting the other.
 function IdPill({
   value,
+  href,
   badge,
   onCopy,
   onChange,
 }: {
   value: string
+  href: string | null
   badge: React.ReactNode
   onCopy: () => void
   onChange: () => void
@@ -152,19 +156,30 @@ function IdPill({
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null)
 
   return (
-    <>
+    <span className="inline-flex items-stretch rounded-full border border-slate-200 bg-white shadow-sm overflow-hidden">
+      {href ? (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={e => e.stopPropagation()}
+          className="font-mono text-xs text-slate-700 hover:text-brand-600 hover:bg-slate-50 truncate max-w-[90px] pl-2.5 pr-1.5 py-1 flex items-center transition"
+        >
+          {value}
+        </a>
+      ) : (
+        <span className="font-mono text-xs text-slate-400 truncate max-w-[90px] pl-2.5 pr-1.5 py-1 flex items-center">{value || '—'}</span>
+      )}
       <button
         onClick={(e) => {
+          e.stopPropagation()
           setAnchorRect(e.currentTarget.getBoundingClientRect())
           setOpen(o => !o)
         }}
-        className="inline-flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-full border border-slate-200 bg-white shadow-sm hover:border-brand-300 hover:bg-slate-50 transition"
+        className="flex items-center gap-1 pl-1.5 pr-2 border-l border-slate-200 hover:bg-slate-50 transition"
       >
-        <span className="font-mono text-xs text-slate-700 truncate max-w-[90px]">{value || '—'}</span>
-        <span className="flex items-center gap-1 pl-1.5 border-l border-slate-200">
-          {badge}
-          <UsFlagBadge />
-        </span>
+        {badge}
+        <UsFlagBadge />
       </button>
       {open && anchorRect && createPortal(
         <>
@@ -189,7 +204,7 @@ function IdPill({
         </>,
         document.body,
       )}
-    </>
+    </span>
   )
 }
 
@@ -588,6 +603,7 @@ export default function Listings() {
                     <td className="px-2.5 py-2">
                       <IdPill
                         value={listing.asin}
+                        href={listing.asin ? `https://www.amazon.com/dp/${listing.asin}` : null}
                         badge={<AmazonBadge />}
                         onCopy={() => void handleCopyId(listing.asin)}
                         onChange={() => void handleChangeAsin(listing)}
@@ -596,6 +612,7 @@ export default function Listings() {
                     <td className="px-2.5 py-2">
                       <IdPill
                         value={listing.ebayId}
+                        href={listing.ebayId ? `https://www.ebay.com/itm/${listing.ebayId}` : null}
                         badge={<EbayBadge />}
                         onCopy={() => void handleCopyId(listing.ebayId)}
                         onChange={() => void handleChangeEbayId(listing)}
