@@ -727,15 +727,38 @@ export function useData(): DataContextValue {
   }, [])
 
   const syncAllEbayListings = useCallback(async (storeId: string) => {
-    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify({ storeId, route: 'sync-all-listings' }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; synced?: number; failed?: number; totalFound?: number; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to sync listings from eBay')
+    // Each call only processes a bounded number of pages (to stay well inside Supabase's
+    // per-invocation execution limit), so for a large catalog this keeps calling with the
+    // returned cursor until the backend reports every page has been fetched.
+    let page = 1
+    let totalSynced = 0
+    let totalFailed = 0
+    let totalFound = 0
+    let done = false
+    let safetyCounter = 0
+
+    while (!done && safetyCounter < 2000) {
+      safetyCounter++
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({ storeId, route: 'sync-all-listings', startPage: page }),
+      })
+      const data = await res.json().catch(() => ({})) as {
+        success?: boolean; synced?: number; failed?: number; totalFound?: number
+        error?: string; nextPage?: number; done?: boolean
+      }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to sync listings from eBay')
+
+      totalSynced += data.synced || 0
+      totalFailed += data.failed || 0
+      totalFound += data.totalFound || 0
+      done = data.done ?? true
+      page = data.nextPage || page + 1
+    }
+
     await refresh()
-    return { synced: data.synced || 0, failed: data.failed || 0, totalFound: data.totalFound || 0 }
+    return { synced: totalSynced, failed: totalFailed, totalFound }
   }, [refresh])
 
   const updateOrderNotes = useCallback(async (orderId: string, notes: string) => {
