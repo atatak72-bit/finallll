@@ -101,7 +101,7 @@ function ActionMenu({
 // ASIN / eBay item IDs so Source/Listing read the same way as the reference design.
 function AmazonBadge() {
   return (
-    <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-slate-900 text-white text-[10px] font-bold leading-none shrink-0">
+    <span className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-slate-900 text-white text-[10px] font-bold leading-none shrink-0">
       a
     </span>
   )
@@ -118,12 +118,25 @@ function EbayBadge() {
   )
 }
 
+// A real drawn SVG flag instead of the 🇺🇸 emoji — emoji flags render as plain "US" letters on
+// systems/fonts without regional-indicator support, which looked broken and not like an icon.
 function UsFlagBadge() {
-  return <span className="text-[11px] leading-none shrink-0" aria-label="US">🇺🇸</span>
+  return (
+    <svg width="15" height="11" viewBox="0 0 20 14" className="shrink-0 rounded-[1.5px] ring-1 ring-black/5" aria-label="US">
+      <rect width="20" height="14" fill="#B22234" />
+      <rect y="1.08" width="20" height="1.08" fill="#fff" />
+      <rect y="3.23" width="20" height="1.08" fill="#fff" />
+      <rect y="5.38" width="20" height="1.08" fill="#fff" />
+      <rect y="7.54" width="20" height="1.08" fill="#fff" />
+      <rect y="9.69" width="20" height="1.08" fill="#fff" />
+      <rect y="11.85" width="20" height="1.08" fill="#fff" />
+      <rect width="8" height="7.54" fill="#3C3B6E" />
+    </svg>
+  )
 }
 
-// Renders an ID (ASIN or eBay item ID) as a small pill with Copy ID / Change ID actions,
-// matching the reference project's Source/Listing columns.
+// Renders an ID (ASIN or eBay item ID) as a proper bordered/shadowed chip button with Copy ID /
+// Change ID actions, matching the reference project's Source/Listing columns.
 function IdPill({
   value,
   badge,
@@ -145,11 +158,13 @@ function IdPill({
           setAnchorRect(e.currentTarget.getBoundingClientRect())
           setOpen(o => !o)
         }}
-        className="inline-flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-slate-100 transition"
+        className="inline-flex items-center gap-1.5 pl-2 pr-1.5 py-1 rounded-full border border-slate-200 bg-white shadow-sm hover:border-brand-300 hover:bg-slate-50 transition"
       >
         <span className="font-mono text-xs text-slate-700 truncate max-w-[90px]">{value || '—'}</span>
-        {badge}
-        <UsFlagBadge />
+        <span className="flex items-center gap-1 pl-1.5 border-l border-slate-200">
+          {badge}
+          <UsFlagBadge />
+        </span>
       </button>
       {open && anchorRect && createPortal(
         <>
