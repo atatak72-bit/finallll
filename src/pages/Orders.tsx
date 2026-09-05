@@ -1,13 +1,29 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { Search, Filter, Package, ArrowUpDown, Loader2 } from 'lucide-react'
+import { Search, Package, Loader2 } from 'lucide-react'
 import { OrderStatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
 import { useStoreData } from '../lib/DataContext'
 import { formatCurrency, formatDate } from '../lib/utils'
 
+// Small uncontrolled note input — saves on blur only if the text actually changed, so we're
+// not firing a write on every keystroke or on a focus/blur with no edit.
+function NotesCell({ orderId, initialNotes, onSave }: { orderId: string; initialNotes: string; onSave: (orderId: string, notes: string) => void }) {
+  return (
+    <input
+      type="text"
+      defaultValue={initialNotes}
+      placeholder="Notes"
+      onBlur={e => {
+        if (e.target.value !== initialNotes) onSave(orderId, e.target.value)
+      }}
+      className="w-full text-xs px-2 py-1.5 rounded-md border border-slate-200 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-200"
+    />
+  )
+}
+
 export default function Orders() {
-  const { orders, loading } = useStoreData()
+  const { orders, loading, updateOrderNotes } = useStoreData()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
 
@@ -24,6 +40,14 @@ export default function Orders() {
 
   const totalProfit = filtered.reduce((s, o) => s + o.profit, 0)
   const pendingCount = orders.filter(o => o.status === 'pending').length
+
+  async function handleSaveNotes(orderId: string, notes: string) {
+    try {
+      await updateOrderNotes(orderId, notes)
+    } catch {
+      // Best-effort — the input already shows what the person typed either way.
+    }
+  }
 
   if (loading) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="w-8 h-8 text-brand-600 animate-spin" /></div>
@@ -78,39 +102,70 @@ export default function Orders() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
-                  <th className="px-4 py-3 font-medium">Order ID</th>
-                  <th className="px-4 py-3 font-medium">Item</th>
-                  <th className="px-4 py-3 font-medium">Buyer</th>
-                  <th className="px-4 py-3 font-medium text-right">Price</th>
-                  <th className="px-4 py-3 font-medium text-right">Profit</th>
-                  <th className="px-4 py-3 font-medium">Date</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
-                  <th className="px-4 py-3 font-medium">Tracking</th>
+                  <th className="px-2.5 py-2 font-medium">Order</th>
+                  <th className="px-2.5 py-2 font-medium">Status</th>
+                  <th className="px-2.5 py-2 font-medium">eBay</th>
+                  <th className="px-2.5 py-2 font-medium">Source</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Amazon Price</th>
+                  <th className="px-2.5 py-2 font-medium">Buyer</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Qty</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Paid</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Order Earnings</th>
+                  <th className="px-2.5 py-2 font-medium text-right">Net Profit</th>
+                  <th className="px-2.5 py-2 font-medium">Notes</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.map(order => (
                   <tr key={order.id} className="border-b border-slate-100 table-row-hover">
-                    <td className="px-4 py-3">
-                      <Link to={`/orders/${order.id}`} className="text-brand-600 hover:text-brand-700 font-medium">{order.orderId}</Link>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2 max-w-xs">
+                    <td className="px-2.5 py-2">
+                      <div className="flex items-center gap-2 max-w-[180px]">
                         <img src={order.listingImage} alt="" className="w-8 h-8 rounded object-cover border border-slate-200 shrink-0" />
-                        <span className="truncate text-slate-700">{order.listingTitle}</span>
+                        <div className="min-w-0">
+                          <Link to={`/orders/${order.id}`} className="text-slate-900 font-medium hover:text-brand-600 truncate block">
+                            {order.listingTitle}
+                          </Link>
+                          <span className="text-[11px] text-slate-400 block truncate">{order.orderId} · {formatDate(order.orderDate)}</span>
+                        </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-slate-700">{order.buyerName}</td>
-                    <td className="px-4 py-3 text-right font-medium text-slate-900">{formatCurrency(order.ebayPrice)}</td>
-                    <td className="px-4 py-3 text-right font-medium text-success-600">{formatCurrency(order.profit)}</td>
-                    <td className="px-4 py-3 text-slate-500 text-xs">{formatDate(order.orderDate)}</td>
-                    <td className="px-4 py-3"><OrderStatusBadge status={order.status} /></td>
-                    <td className="px-4 py-3">
-                      {order.trackingNumber ? (
-                        <span className="text-xs font-mono text-slate-600">{order.trackingCarrier}</span>
+                    <td className="px-2.5 py-2"><OrderStatusBadge status={order.status} /></td>
+                    <td className="px-2.5 py-2">
+                      {order.ebayItemId ? (
+                        <a
+                          href={`https://www.ebay.com/itm/${order.ebayItemId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-xs text-brand-600 hover:underline"
+                        >
+                          {order.ebayItemId}
+                        </a>
                       ) : (
-                        <span className="text-xs text-warning-600">Not shipped</span>
+                        <span className="font-mono text-xs text-slate-400">—</span>
                       )}
+                    </td>
+                    <td className="px-2.5 py-2">
+                      {order.asin ? (
+                        <a
+                          href={`https://www.amazon.com/dp/${order.asin}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-mono text-xs text-brand-600 hover:underline"
+                        >
+                          {order.asin}
+                        </a>
+                      ) : (
+                        <span className="font-mono text-xs text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="px-2.5 py-2 text-right text-slate-600">{formatCurrency(order.amazonCost)}</td>
+                    <td className="px-2.5 py-2 text-slate-700">{order.buyerName}</td>
+                    <td className="px-2.5 py-2 text-right text-slate-700">{order.quantity ?? 1}</td>
+                    <td className="px-2.5 py-2 text-right font-medium text-slate-900">{formatCurrency(order.ebayPrice)}</td>
+                    <td className="px-2.5 py-2 text-right text-slate-700">{formatCurrency(order.orderEarnings ?? 0)}</td>
+                    <td className="px-2.5 py-2 text-right font-medium text-success-600">{formatCurrency(order.profit)}</td>
+                    <td className="px-2.5 py-2 min-w-[140px]">
+                      <NotesCell orderId={order.id} initialNotes={order.notes} onSave={handleSaveNotes} />
                     </td>
                   </tr>
                 ))}
