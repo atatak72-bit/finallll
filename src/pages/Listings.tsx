@@ -10,7 +10,7 @@ import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
-import { formatCurrency, cn } from '../lib/utils'
+import { formatCurrency, cn, calculateEbayPrice } from '../lib/utils'
 import type { ListingStatus } from '../data/types'
 
 const PAGE_SIZE = 100
@@ -416,8 +416,60 @@ export default function Listings() {
     if (!newAsin || newAsin === listing.asin) return
     setActionError(null)
     try {
-      const { error } = await supabase.from('listings').update({ asin: newAsin }).eq('id', listing.id)
-      if (error) throw new Error(error.message)
+      // Save the ASIN right away so it's visible immediately.
+      const { error: asinErr } = await supabase.from('listings').update({ asin: newAsin }).eq('id', listing.id)
+      if (asinErr) throw new Error(asinErr.message)
+
+      // Then immediately fetch the real Amazon price and push the recalculated eBay price —
+      // don't wait for the next periodic stock-check sweep (which runs every ~75s but goes
+      // through listings in order, so a freshly-added ASIN could sit for a while looking like
+      // nothing happened). skip_duplicate_check is required here since amazon-fetch's "already
+      // listed" guard would otherwise flag this listing against the ASIN we just gave it.
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+      const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+      const fetchRes = await fetch(`${supabaseUrl}/functions/v1/amazon-fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+        body: JSON.stringify({ asin: newAsin, store_id: listing.storeId, skip_duplicate_check: true }),
+      })
+      const fetchData = await fetchRes.json().catch(() => ({}))
+
+      if (fetchData.success && fetchData.product) {
+        const amazonPrice = Number(fetchData.product.price) || 0
+        if (amazonPrice > 0) {
+          const [settingsRes, tiersRes] = await Promise.all([
+            supabase.from('pricing_settings').select('*').eq('store_id', listing.storeId).maybeSingle(),
+            supabase.from('pricing_rules').select('*').eq('store_id', listing.storeId).order('sort_order', { ascending: true }),
+          ])
+          const pricingEnabled = settingsRes.data?.pricing_enabled ?? true
+          const pctFee = Number(settingsRes.data?.ebay_percentage_fee) || 13.25
+          const fixedFee = Number(settingsRes.data?.ebay_fixed_fee) || 0.30
+          const tiers = (tiersRes.data || []).map(t => ({
+            min: Number(t.min_price) || 0,
+            max: Number(t.max_price) || 999999,
+            profitPct: Number(t.profit_pct) || 0,
+            fixProfit: Number(t.fixed_profit) || 0,
+          }))
+          const calc = calculateEbayPrice(amazonPrice, tiers, pctFee, fixedFee, pricingEnabled)
+          const newEbayPrice = calc.finalPrice
+
+          await supabase.from('listings').update({
+            amazon_price: amazonPrice,
+            ebay_price: newEbayPrice,
+            last_stock_check: new Date().toISOString(),
+          }).eq('id', listing.id)
+
+          // Push the new price live to eBay too, not just our own database.
+          if (listing.ebayId) {
+            await fetch(`${supabaseUrl}/functions/v1/ebay-sync/update-listing`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+              body: JSON.stringify({ storeId: listing.storeId, route: 'update-listing', sku: newAsin, price: newEbayPrice }),
+            })
+          }
+        }
+      }
+
       await refresh()
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to update ASIN')
