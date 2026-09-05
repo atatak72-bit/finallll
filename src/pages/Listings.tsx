@@ -177,6 +177,8 @@ function IdPill({
     </>
   )
 }
+
+export default function Listings() {
   const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings, refresh } = useStoreData()
   const activeStore = stores.find(s => s.active) || stores[0]
   const [syncingFromEbay, setSyncingFromEbay] = useState(false)
