@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import {
   Search, Filter, Edit2, Pencil, CheckSquare,
   Square, ArrowUpDown, Tag, ShoppingBag, AlertCircle, Loader2, ChevronDown,
-  ChevronLeft, ChevronRight, MoreVertical, XCircle, Unlink2, Trash2,
+  ChevronLeft, ChevronRight, MoreVertical, XCircle, Unlink2, Trash2, Copy,
 } from 'lucide-react'
 import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
@@ -97,8 +97,87 @@ function ActionMenu({
   )
 }
 
-export default function Listings() {
-  const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings } = useStoreData()
+// Small "a" badge mimicking Amazon's mark, and a colored "ebay" wordmark badge — used next to
+// ASIN / eBay item IDs so Source/Listing read the same way as the reference design.
+function AmazonBadge() {
+  return (
+    <span className="inline-flex items-center justify-center w-4 h-4 rounded bg-slate-900 text-white text-[10px] font-bold leading-none shrink-0">
+      a
+    </span>
+  )
+}
+
+function EbayBadge() {
+  return (
+    <span className="text-[10px] font-bold leading-none shrink-0 tracking-tight">
+      <span style={{ color: '#e53238' }}>e</span>
+      <span style={{ color: '#0064d2' }}>b</span>
+      <span style={{ color: '#f5af02' }}>a</span>
+      <span style={{ color: '#86b817' }}>y</span>
+    </span>
+  )
+}
+
+function UsFlagBadge() {
+  return <span className="text-[11px] leading-none shrink-0" aria-label="US">🇺🇸</span>
+}
+
+// Renders an ID (ASIN or eBay item ID) as a small pill with Copy ID / Change ID actions,
+// matching the reference project's Source/Listing columns.
+function IdPill({
+  value,
+  badge,
+  onCopy,
+  onChange,
+}: {
+  value: string
+  badge: React.ReactNode
+  onCopy: () => void
+  onChange: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null)
+
+  return (
+    <>
+      <button
+        onClick={(e) => {
+          setAnchorRect(e.currentTarget.getBoundingClientRect())
+          setOpen(o => !o)
+        }}
+        className="inline-flex items-center gap-1 px-1.5 py-1 rounded-md hover:bg-slate-100 transition"
+      >
+        <span className="font-mono text-xs text-slate-700 truncate max-w-[90px]">{value || '—'}</span>
+        {badge}
+        <UsFlagBadge />
+      </button>
+      {open && anchorRect && createPortal(
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div
+            className="fixed z-50 bg-white rounded-lg border border-slate-200 shadow-xl py-1 w-40"
+            style={{ top: anchorRect.bottom + 4, left: Math.min(anchorRect.left, window.innerWidth - 168) }}
+          >
+            <button
+              onClick={() => { onCopy(); setOpen(false) }}
+              className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+            >
+              <Copy className="w-3.5 h-3.5 text-slate-400" /> Copy ID
+            </button>
+            <button
+              onClick={() => { onChange(); setOpen(false) }}
+              className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+            >
+              <Edit2 className="w-3.5 h-3.5 text-slate-400" /> Change ID
+            </button>
+          </div>
+        </>,
+        document.body,
+      )}
+    </>
+  )
+}
+  const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings, refresh } = useStoreData()
   const activeStore = stores.find(s => s.active) || stores[0]
   const [syncingFromEbay, setSyncingFromEbay] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
@@ -288,6 +367,48 @@ export default function Listings() {
     if (failures.length > 0) setActionError(failures.slice(0, 3).join(' | '))
   }
 
+  async function handleCopyId(value: string) {
+    if (!value) return
+    try {
+      await navigator.clipboard.writeText(value)
+    } catch {
+      // Clipboard access can fail (permissions, insecure context) — nothing more to do here.
+    }
+  }
+
+  async function handleChangeAsin(listing: typeof listings[number]) {
+    const input = window.prompt('New ASIN for this listing:', listing.asin)
+    if (input === null) return
+    const newAsin = input.trim().toUpperCase()
+    if (!newAsin || newAsin === listing.asin) return
+    setActionError(null)
+    try {
+      const { error } = await supabase.from('listings').update({ asin: newAsin }).eq('id', listing.id)
+      if (error) throw new Error(error.message)
+      await refresh()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update ASIN')
+    }
+  }
+
+  async function handleChangeEbayId(listing: typeof listings[number]) {
+    const input = window.prompt(
+      'New eBay Item ID for this listing:\n\nNote: this only corrects the ID stored here — it does not move or recreate anything on eBay itself.',
+      listing.ebayId,
+    )
+    if (input === null) return
+    const newEbayId = input.trim()
+    if (!newEbayId || newEbayId === listing.ebayId) return
+    setActionError(null)
+    try {
+      const { error } = await supabase.from('listings').update({ ebay_id: newEbayId }).eq('id', listing.id)
+      if (error) throw new Error(error.message)
+      await refresh()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to update eBay Item ID')
+    }
+  }
+
   const statusOptions: { value: ListingStatus | 'all'; label: string }[] = [
     { value: 'all', label: 'All' },
     { value: 'active', label: 'Active' },
@@ -448,34 +569,20 @@ export default function Listings() {
                       </div>
                     </td>
                     <td className="px-2.5 py-2">
-                      {listing.asin ? (
-                        <a
-                          href={`https://www.amazon.com/dp/${listing.asin}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          className="font-mono text-xs text-brand-600 hover:underline"
-                        >
-                          {listing.asin}
-                        </a>
-                      ) : (
-                        <span className="font-mono text-xs text-slate-400">—</span>
-                      )}
+                      <IdPill
+                        value={listing.asin}
+                        badge={<AmazonBadge />}
+                        onCopy={() => void handleCopyId(listing.asin)}
+                        onChange={() => void handleChangeAsin(listing)}
+                      />
                     </td>
                     <td className="px-2.5 py-2">
-                      {listing.ebayId ? (
-                        <a
-                          href={`https://www.ebay.com/itm/${listing.ebayId}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={e => e.stopPropagation()}
-                          className="font-mono text-xs text-brand-600 hover:underline"
-                        >
-                          {listing.ebayId}
-                        </a>
-                      ) : (
-                        <span className="font-mono text-xs text-slate-400">—</span>
-                      )}
+                      <IdPill
+                        value={listing.ebayId}
+                        badge={<EbayBadge />}
+                        onCopy={() => void handleCopyId(listing.ebayId)}
+                        onChange={() => void handleChangeEbayId(listing)}
+                      />
                     </td>
                     <td className="px-2.5 py-2 text-right text-slate-600">{formatCurrency(listing.amazonPrice)}</td>
                     <td className="px-2.5 py-2 text-right">
