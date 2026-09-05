@@ -962,7 +962,7 @@ export function PricingSection() {
           {/* Editable inputs */}
           <div className="grid grid-cols-2 gap-4 max-w-md">
             <div>
-              <label className="label">eBay percentage fee (%) — not your profit</label>
+              <label className="label">Percentage fee (%)</label>
               <input
                 className="input"
                 type="number"
@@ -972,7 +972,7 @@ export function PricingSection() {
               />
             </div>
             <div>
-              <label className="label">eBay fixed fee ($)</label>
+              <label className="label">Fixed fee ($)</label>
               <input
                 className="input"
                 type="number"
