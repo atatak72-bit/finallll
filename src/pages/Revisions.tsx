@@ -8,6 +8,27 @@ import type { Revision } from '../data/types'
 
 const PAGE_SIZE = 50
 
+const NEGATIVE_STATUS_VALUES = new Set(['out_of_stock', 'ended', 'inactive', 'unpublished'])
+const POSITIVE_STATUS_VALUES = new Set(['active', 'synced', 'in_stock'])
+
+// Green when the change is a genuine improvement (price/quantity went up, status became a good
+// one), red when it's a genuine downgrade (price/quantity went down, status became a bad one),
+// and neutral gray when the value didn't actually change at all — this last case is what used
+// to incorrectly show as red before (e.g. "18.2 to 18.2" whenever a check ran but nothing moved).
+function changeColorClass(field: string, oldValue: string, newValue: string): string {
+  if (field === 'status') {
+    if (POSITIVE_STATUS_VALUES.has(newValue.toLowerCase())) return 'text-green-500'
+    if (NEGATIVE_STATUS_VALUES.has(newValue.toLowerCase())) return 'text-red-500'
+    return 'text-slate-500'
+  }
+  const oldNum = parseFloat(oldValue.replace('$', ''))
+  const newNum = parseFloat(newValue.replace('$', ''))
+  if (Number.isNaN(oldNum) || Number.isNaN(newNum)) return 'text-slate-700'
+  if (newNum > oldNum) return 'text-green-500'
+  if (newNum < oldNum) return 'text-red-500'
+  return 'text-slate-500'
+}
+
 export default function Revisions() {
   const { stores } = useStoreData()
   const activeStore = stores.find(s => s.active) || stores[0]
@@ -79,7 +100,7 @@ export default function Revisions() {
           <div className="divide-y divide-slate-100">
             {revisions.map(rev => {
               const Icon = fieldIcon[rev.field as keyof typeof fieldIcon] || Minus
-              const isPriceUp = rev.field === 'price' && parseFloat(rev.newValue.replace('$', '')) > parseFloat(rev.oldValue.replace('$', ''))
+              const colorClass = changeColorClass(rev.field, rev.oldValue, rev.newValue)
               return (
                 <div key={rev.id} className="flex items-center gap-4 p-4 hover:bg-slate-50 transition">
                   <div className={cn(
@@ -95,7 +116,7 @@ export default function Revisions() {
                     <p className="text-xs text-slate-500">
                       <span className="capitalize">{rev.field}</span> changed from{' '}
                       <span className="font-medium text-slate-700">{rev.oldValue || '—'}</span> to{' '}
-                      <span className={cn('font-medium', isPriceUp ? 'text-success-600' : 'text-error-600')}>{rev.newValue}</span>
+                      <span className={cn('font-bold', colorClass)}>{rev.newValue}</span>
                       {' '}— {rev.reason}
                     </p>
                   </div>
