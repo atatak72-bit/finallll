@@ -1129,31 +1129,18 @@ function AvailabilitySection() {
       }, { onConflict: 'store_id' })
       if (upsertErr) throw new Error(upsertErr.message)
 
-      // Also apply this quantity to every existing listing for this store right now — not
-      // just future ones — both in our own database and pushed live to eBay's real inventory.
-      const { data: storeListings, error: listErr } = await supabase
-        .from('listings')
-        .select('id, asin, ebay_id')
-        .eq('store_id', sid)
-      if (listErr) throw new Error(listErr.message)
-
-      for (const l of storeListings || []) {
-        const { error: qtyErr } = await supabase.from('listings').update({ quantity: defaultQuantity }).eq('id', l.id)
-        if (qtyErr) continue // best-effort per listing — one bad row shouldn't abort the whole batch
-        updatedListingsCount++
-
-        if (l.ebay_id && l.asin) {
-          try {
-            await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/update-listing`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-              body: JSON.stringify({ storeId: sid, route: 'update-listing', sku: l.asin, quantity: defaultQuantity }),
-            })
-          } catch {
-            // Best-effort push to eBay — the local quantity is still correct either way.
-          }
-        }
-      }
+      // Apply this quantity to every existing listing for this store right now, done
+      // server-side so it scales correctly whether there are 3 listings or 30,000 — a single
+      // database query for our own records, and eBay's real bulk endpoint (25 SKUs per call)
+      // instead of one HTTP request per listing.
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/bulk-set-quantity`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+        body: JSON.stringify({ storeId: sid, route: 'bulk-set-quantity', quantity: defaultQuantity }),
+      })
+      const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string; localUpdated?: number }
+      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to apply quantity to existing listings')
+      updatedListingsCount += data.localUpdated || 0
     }
     return updatedListingsCount
   }
