@@ -1115,6 +1115,7 @@ function AvailabilitySection() {
 
   async function persistAll(storeIds: string[]) {
     const now = new Date().toISOString()
+    let updatedListingsCount = 0
     for (const sid of storeIds) {
       const { error: upsertErr } = await supabase.from('store_availability_settings').upsert({
         store_id: sid,
@@ -1127,7 +1128,34 @@ function AvailabilitySection() {
         updated_at: now,
       }, { onConflict: 'store_id' })
       if (upsertErr) throw new Error(upsertErr.message)
+
+      // Also apply this quantity to every existing listing for this store right now — not
+      // just future ones — both in our own database and pushed live to eBay's real inventory.
+      const { data: storeListings, error: listErr } = await supabase
+        .from('listings')
+        .select('id, asin, ebay_id')
+        .eq('store_id', sid)
+      if (listErr) throw new Error(listErr.message)
+
+      for (const l of storeListings || []) {
+        const { error: qtyErr } = await supabase.from('listings').update({ quantity: defaultQuantity }).eq('id', l.id)
+        if (qtyErr) continue // best-effort per listing — one bad row shouldn't abort the whole batch
+        updatedListingsCount++
+
+        if (l.ebay_id && l.asin) {
+          try {
+            await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/update-listing`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+              body: JSON.stringify({ storeId: sid, route: 'update-listing', sku: l.asin, quantity: defaultQuantity }),
+            })
+          } catch {
+            // Best-effort push to eBay — the local quantity is still correct either way.
+          }
+        }
+      }
     }
+    return updatedListingsCount
   }
 
   async function saveSettings(forAllStores = false) {
@@ -1136,12 +1164,12 @@ function AvailabilitySection() {
     setToast(null)
     try {
       const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistAll(storeIds)
+      const updatedCount = await persistAll(storeIds)
       setToast({
         type: 'success',
         msg: forAllStores
-          ? `Availability settings saved for all ${storeIds.length} connected stores.`
-          : 'Availability settings saved.',
+          ? `Availability settings saved for all ${storeIds.length} connected stores. ${updatedCount} existing listing${updatedCount === 1 ? '' : 's'} updated to quantity ${defaultQuantity}.`
+          : `Availability settings saved. ${updatedCount} existing listing${updatedCount === 1 ? '' : 's'} updated to quantity ${defaultQuantity}.`,
       })
     } catch (err) {
       setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save availability settings.' })
@@ -1172,7 +1200,7 @@ function AvailabilitySection() {
               value={defaultQuantity}
               onChange={e => setDefaultQuantity(+e.target.value)}
             />
-            <p className="text-xs text-slate-400 mt-1">Sets initial available inventory when listing items on eBay.</p>
+            <p className="text-xs text-slate-400 mt-1">Applies to new listings AND updates every existing listing's quantity (here and live on eBay) as soon as you save.</p>
           </div>
           <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
             <Toggle checked={primeFilter} onChange={setPrimeFilter} />
