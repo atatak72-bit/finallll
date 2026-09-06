@@ -13,7 +13,7 @@ import { supabase } from '../lib/supabase'
 import { formatCurrency, cn, calculateEbayPrice } from '../lib/utils'
 import type { ListingStatus } from '../data/types'
 
-const PAGE_SIZE = 100
+const PAGE_SIZE_OPTIONS = [50, 100] as const
 
 function markupPct(ebayPrice: number, amazonPrice: number): string | null {
   if (!amazonPrice || amazonPrice <= 0) return null
@@ -241,6 +241,7 @@ export default function Listings() {
   const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState<typeof PAGE_SIZE_OPTIONS[number]>(50)
 
   const filtered = useMemo(() => {
     let result = listings.filter(l => {
@@ -261,13 +262,13 @@ export default function Listings() {
 
   useEffect(() => {
     setPage(1)
-  }, [search, statusFilter, sortField, sortDir])
+  }, [search, statusFilter, sortField, sortDir, pageSize])
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, totalPages)
   const paged = useMemo(
-    () => filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [filtered, currentPage],
+    () => filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [filtered, currentPage, pageSize],
   )
 
   const allSelected = paged.length > 0 && paged.every(l => selected.includes(l.id))
@@ -508,7 +509,7 @@ export default function Listings() {
   }
 
   return (
-    <div className="space-y-4 max-w-7xl mx-auto">
+    <div className="space-y-4 max-w-7xl">
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[200px]">
           <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -528,6 +529,16 @@ export default function Listings() {
             className="input w-auto"
           >
             {statusOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={pageSize}
+            onChange={e => setPageSize(Number(e.target.value) as typeof PAGE_SIZE_OPTIONS[number])}
+            className="input w-auto"
+            title="Rows per page"
+          >
+            {PAGE_SIZE_OPTIONS.map(size => <option key={size} value={size}>{size} / page</option>)}
           </select>
         </div>
         <button
@@ -715,7 +726,7 @@ export default function Listings() {
         )}
         <div className="px-4 py-3 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between flex-wrap gap-2">
           <span>
-            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} of {filtered.length} listings
+            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length} listings
           </span>
           <div className="flex items-center gap-2">
             <button
