@@ -122,7 +122,7 @@ export interface DataContextValue {
   processBulkRun: (runId: string) => Promise<void>
   deleteBulkRun: (runId: string) => Promise<void>
   linkExistingListings: (storeId: string, pairs: Array<{ ebayId: string; asin: string }>) => Promise<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> }>
-  endListing: (storeId: string, listingId: string, sku?: string) => Promise<void>
+  endListing: (storeId: string, listingId: string, sku?: string, opts?: { skipRefresh?: boolean }) => Promise<void>
   removeListingLocal: (listingId: string) => Promise<void>
   syncAllEbayListings: (storeId: string) => Promise<{ synced: number; failed: number; totalFound: number }>
   updateOrderNotes: (orderId: string, notes: string) => Promise<void>
@@ -707,7 +707,7 @@ export function useData(): DataContextValue {
     return { linked, failed: failedList }
   }, [fetchAmazonProduct, refresh])
 
-  const endListing = useCallback(async (storeId: string, listingId: string, sku?: string) => {
+  const endListing = useCallback(async (storeId: string, listingId: string, sku?: string, opts?: { skipRefresh?: boolean }) => {
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/end-listing`
     const res = await fetch(syncUrl, {
       method: 'POST',
@@ -717,7 +717,10 @@ export function useData(): DataContextValue {
     const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to end listing on eBay')
     setListings(prev => prev.filter(l => l.id !== listingId))
-    await refresh()
+    // Bulk callers (ending many listings at once) skip this and refresh a single time at the
+    // end of the whole batch instead — refreshing the entire app's data after every single item
+    // is what made deleting, say, 17 listings feel like it was happening one at a time.
+    if (!opts?.skipRefresh) await refresh()
   }, [refresh])
 
   const removeListingLocal = useCallback(async (listingId: string) => {
