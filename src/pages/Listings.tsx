@@ -655,10 +655,10 @@ export default function Listings() {
                         {selected.includes(listing.id) ? <CheckSquare className="w-4 h-4 text-brand-600" /> : <Square className="w-4 h-4 text-slate-300" />}
                       </button>
                     </td>
-                    <td className="px-2.5 py-2">
-                      <div className="flex items-center gap-2">
-                        <img src={listing.image} alt="" className="w-7 h-7 rounded-lg object-cover border border-slate-200 shrink-0" />
-                        <Link to={`/listings/${listing.id}`} className="font-medium text-slate-900 hover:text-brand-600 truncate max-w-[130px]">
+                    <td className="px-3 py-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <img src={listing.image} alt="" className="w-8 h-8 rounded-lg object-cover border border-slate-200 shrink-0" />
+                        <Link to={`/listings/${listing.id}`} className="font-medium text-slate-900 hover:text-brand-600 truncate max-w-[260px]">
                           {listing.title}
                         </Link>
                         {listing.promoted && <span className="badge-info text-xs shrink-0">Promoted</span>}
