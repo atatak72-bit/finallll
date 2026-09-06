@@ -328,17 +328,28 @@ export default function Listings() {
     setActionError(null)
     setBulkRunning(true)
     const failures: string[] = []
-    for (const l of targets) {
-      try {
-        if (mode === 'ebay') {
-          await endListing(l.storeId, l.id, l.asin || undefined)
-        } else {
-          await removeListingLocal(l.id)
+
+    // Run several at once instead of strictly one-at-a-time — each still ends up making its
+    // own real eBay call (there's no bulk "withdraw offer" endpoint to batch these into), but
+    // this cuts the wall-clock time roughly by the concurrency factor instead of waiting for
+    // each one to fully finish (including a whole-app data reload) before starting the next.
+    const CONCURRENCY = 5
+    for (let i = 0; i < targets.length; i += CONCURRENCY) {
+      const chunk = targets.slice(i, i + CONCURRENCY)
+      await Promise.all(chunk.map(async l => {
+        try {
+          if (mode === 'ebay') {
+            await endListing(l.storeId, l.id, l.asin || undefined, { skipRefresh: true })
+          } else {
+            await removeListingLocal(l.id)
+          }
+        } catch (err) {
+          failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
         }
-      } catch (err) {
-        failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
-      }
+      }))
     }
+
+    if (mode === 'ebay') await refresh()
     setBulkRunning(false)
     setSelected([])
     if (failures.length > 0) setActionError(failures.slice(0, 3).join(' | '))
