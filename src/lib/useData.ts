@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE } from './utils'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -500,6 +500,24 @@ export function useData(): DataContextValue {
       .maybeSingle()
     const templateStoreName = templateStoreRow?.ebay_username || templateStoreRow?.store_nickname || 'Our Store'
 
+    // Fetch this store's real profit-margin settings once for the whole run — the same
+    // pricing_settings/pricing_rules and calculateEbayPrice engine the Single tab already
+    // uses — instead of relying on amazon-fetch's suggestedPrice, which is always a flat 30%
+    // markup baked into that function and ignores whatever margin the store actually has set.
+    const [bulkPricingSettingsRes, bulkPricingRulesRes] = await Promise.all([
+      supabase.from('pricing_settings').select('pricing_enabled, ebay_percentage_fee, ebay_fixed_fee').eq('store_id', run.store_id).maybeSingle(),
+      supabase.from('pricing_rules').select('min_price, max_price, profit_pct, fixed_profit').eq('store_id', run.store_id).order('sort_order', { ascending: true }),
+    ])
+    const bulkPricingEnabled = bulkPricingSettingsRes.data?.pricing_enabled ?? true
+    const bulkEbayFeePct = Number(bulkPricingSettingsRes.data?.ebay_percentage_fee) || 13.25
+    const bulkEbayFixedFee = Number(bulkPricingSettingsRes.data?.ebay_fixed_fee) || 0.30
+    const bulkPricingTiers = (bulkPricingRulesRes.data || []).map(r => ({
+      min: Number(r.min_price) || 0,
+      max: Number(r.max_price) || 999999,
+      profitPct: Number(r.profit_pct) || 0,
+      fixProfit: Number(r.fixed_profit) || 0,
+    }))
+
     let succeeded = 0
     let failed = 0
 
@@ -515,7 +533,10 @@ export function useData(): DataContextValue {
         let title = item.custom_title || product.title
         let aspects: Record<string, string[]> | undefined
         let aiDetectedCategoryId: string | undefined
-        const price = product.suggestedPrice
+        const rawAmazonPrice = Number(product.price) || 0
+        const price = bulkPricingEnabled && bulkPricingTiers.length > 0
+          ? calculateEbayPrice(rawAmazonPrice, bulkPricingTiers, bulkEbayFeePct, bulkEbayFixedFee, bulkPricingEnabled).finalPrice
+          : (product.suggestedPrice || rawAmazonPrice)
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
         // AI Titles: only regenerate the title when the person didn't set a custom one for
