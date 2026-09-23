@@ -127,6 +127,32 @@ export function truncateTitleTo80(title: string): string {
 const EBAY_ASPECT_VALUE_MAX = 65
 const EBAY_ASPECT_MAX_VALUES = 30
 
+// eBay commonly requires a "Model" (and sometimes "MPN") item specific for many categories,
+// but the Bulk pipeline previously only ever populated aspects when "AI Titles" was enabled —
+// with it off, no aspects were sent at all, so any category requiring Model always failed to
+// publish. This pulls a Model/MPN value straight from Amazon's own raw spec table (product.specs)
+// when one is present there, independent of the AI Titles toggle, using a case-insensitive
+// search over the common key names Amazon itself uses for this. Returns only the keys it found
+// something for — never overwrites an aspect the caller already has a value for (e.g. from AI).
+const MODEL_SPEC_KEYS = ["item model number", "model number", "model name", "model"]
+const MPN_SPEC_KEYS = ["manufacturer part number", "part number", "mpn"]
+
+export function extractBasicAspectsFromSpecs(specs?: Record<string, string | number> | null): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  if (!specs) return out
+  const entries = Object.entries(specs).map(([k, v]) => [k.toLowerCase().trim(), String(v ?? '').trim()] as const)
+
+  for (const wanted of MODEL_SPEC_KEYS) {
+    const hit = entries.find(([k]) => k === wanted)
+    if (hit && hit[1]) { out.Model = [hit[1]]; break }
+  }
+  for (const wanted of MPN_SPEC_KEYS) {
+    const hit = entries.find(([k]) => k === wanted)
+    if (hit && hit[1]) { out.MPN = [hit[1]]; break }
+  }
+  return out
+}
+
 export function sanitizeAspects(aspects?: Record<string, string[]>): Record<string, string[]> | undefined {
   if (!aspects) return aspects
   const out: Record<string, string[]> = {}
