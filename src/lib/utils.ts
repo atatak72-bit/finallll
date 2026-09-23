@@ -134,29 +134,42 @@ const EBAY_ASPECT_MAX_VALUES = 30
 // when one is present there, independent of the AI Titles toggle, using a case-insensitive
 // search over the common key names Amazon itself uses for this. Returns only the keys it found
 // something for — never overwrites an aspect the caller already has a value for (e.g. from AI).
-const MODEL_SPEC_KEYS = ["item model number", "model number", "model name", "model"]
 const MPN_SPEC_KEYS = ["manufacturer part number", "part number", "mpn"]
+
+// Fields eBay has actually rejected listings over for being missing (Model, Color, Type — each
+// confirmed by a real "item specific X is missing" publish error), each with the raw Amazon
+// spec-table key names that carry that value when Amazon happens to provide one, in priority
+// order. Always resolved for every listing (regardless of category) since sending an aspect
+// name eBay's category doesn't ask for is harmless — only a MISSING required one blocks
+// publishing — so this preempts the next category that requires one of these three without
+// waiting to hit that specific error first.
+const FALLBACK_ASPECT_SPEC_KEYS: Record<string, string[]> = {
+  Model: ["item model number", "model number", "model name", "model"],
+  Color: ["color", "colour"],
+  Type: ["type", "style"],
+}
 
 export function extractBasicAspectsFromSpecs(specs?: Record<string, string | number> | null): Record<string, string[]> {
   const out: Record<string, string[]> = {}
-  if (!specs) return out
-  const entries = Object.entries(specs).map(([k, v]) => [k.toLowerCase().trim(), String(v ?? '').trim()] as const)
+  const entries = specs ? Object.entries(specs).map(([k, v]) => [k.toLowerCase().trim(), String(v ?? '').trim()] as const) : []
 
-  for (const wanted of MODEL_SPEC_KEYS) {
-    const hit = entries.find(([k]) => k === wanted)
-    if (hit && hit[1]) { out.Model = [hit[1]]; break }
-  }
   for (const wanted of MPN_SPEC_KEYS) {
     const hit = entries.find(([k]) => k === wanted)
     if (hit && hit[1]) { out.MPN = [hit[1]]; break }
   }
 
-  // Many eBay categories require a Model value to publish at all, but plenty of real Amazon
-  // products (generic/unbranded parts especially) simply don't list one anywhere. "Does not
-  // apply" is eBay's own standard, accepted value for this situation — the same convention
-  // already used for Brand — so Model always gets SOME value rather than leaving the listing
-  // unpublishable whenever Amazon's spec table doesn't happen to have this field.
-  if (!out.Model) out.Model = ["Does not apply"]
+  // For each of Model/Color/Type: use the real Amazon value when the spec table has one,
+  // otherwise fall back to eBay's own standard "Does not apply" value — the same convention
+  // already used for Brand — so a listing is never blocked just because Amazon's page didn't
+  // happen to list one of these for a generic/unbranded product.
+  for (const [ebayField, specKeys] of Object.entries(FALLBACK_ASPECT_SPEC_KEYS)) {
+    let value: string | null = null
+    for (const wanted of specKeys) {
+      const hit = entries.find(([k]) => k === wanted)
+      if (hit && hit[1]) { value = hit[1]; break }
+    }
+    out[ebayField] = [value || "Does not apply"]
+  }
 
   return out
 }
