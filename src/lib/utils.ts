@@ -161,26 +161,37 @@ export function extractBasicAspectsFromSpecs(specs?: Record<string, string | num
   return out
 }
 
+// A single oversized value is truncated in place (word/comma-boundary preferred) rather than
+// split into multiple array entries — many eBay aspects (e.g. "Color Temperature") only accept
+// ONE value per field ("should contain only one value"), so turning one long comma-separated
+// value into several array entries fixed the length error but broke those single-value fields
+// instead. Truncating keeps the array at its original length (1 value stays 1 value) while
+// still respecting the 65-character cap, at the cost of only keeping the leading portion of a
+// very long joined list — an acceptable trade since a cardinality violation blocks the whole
+// listing outright, while a shortened value does not.
+function truncateAspectValue(str: string): string {
+  if (str.length <= EBAY_ASPECT_VALUE_MAX) return str
+  const window = str.slice(0, EBAY_ASPECT_VALUE_MAX)
+  const lastComma = window.lastIndexOf(',')
+  if (lastComma > EBAY_ASPECT_VALUE_MAX * 0.4) return window.slice(0, lastComma).trim()
+  const lastSpace = window.lastIndexOf(' ')
+  if (lastSpace > EBAY_ASPECT_VALUE_MAX * 0.6) return window.slice(0, lastSpace).trim()
+  return window.trim()
+}
+
 export function sanitizeAspects(aspects?: Record<string, string[]>): Record<string, string[]> | undefined {
   if (!aspects) return aspects
   const out: Record<string, string[]> = {}
   for (const [key, values] of Object.entries(aspects)) {
     if (!Array.isArray(values)) continue
-    const expanded: string[] = []
+    const cleaned: string[] = []
     for (const raw of values) {
       const str = String(raw ?? '').trim()
       if (!str) continue
-      if (str.length <= EBAY_ASPECT_VALUE_MAX) {
-        expanded.push(str)
-        continue
-      }
-      const pieces = str.split(',').map(p => p.trim()).filter(Boolean)
-      for (const p of pieces) {
-        expanded.push(p.length <= EBAY_ASPECT_VALUE_MAX ? p : p.slice(0, EBAY_ASPECT_VALUE_MAX).trim())
-      }
+      cleaned.push(truncateAspectValue(str))
     }
-    if (expanded.length > 0) {
-      out[key] = Array.from(new Set(expanded)).slice(0, EBAY_ASPECT_MAX_VALUES)
+    if (cleaned.length > 0) {
+      out[key] = Array.from(new Set(cleaned)).slice(0, EBAY_ASPECT_MAX_VALUES)
     }
   }
   return Object.keys(out).length > 0 ? out : undefined
