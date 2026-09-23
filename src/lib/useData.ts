@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice } from './utils'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice, truncateTitleTo80, sanitizeAspects } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -536,7 +536,11 @@ export function useData(): DataContextValue {
 
       try {
         const product = await fetchAmazonProduct(item.asin, run.store_id)
-        let title = item.custom_title || product.title
+        // eBay item titles are capped at 80 characters — the bulk pipeline previously sent
+        // the raw, often much longer, Amazon title straight through unlike the Single tab
+        // (which already truncates). Apply the same word-safe cap here for both a custom
+        // title override and the raw Amazon title.
+        let title = truncateTitleTo80(item.custom_title || product.title)
         let aspects: Record<string, string[]> | undefined
         let aiDetectedCategoryId: string | undefined
         const rawAmazonPrice = Number(product.price) || 0
@@ -565,7 +569,7 @@ export function useData(): DataContextValue {
               },
             })
             const aiResult = (aiData || {}) as { title?: string; description?: string; aspects?: Record<string, string[]>; categoryId?: string }
-            if (aiResult.title) title = aiResult.title
+            if (aiResult.title) title = truncateTitleTo80(aiResult.title)
             if (aiResult.description) aiDescription = aiResult.description
             if (aiResult.aspects && Object.keys(aiResult.aspects).length > 0) aspects = aiResult.aspects
             if (aiResult.categoryId) aiDetectedCategoryId = aiResult.categoryId
@@ -618,7 +622,12 @@ export function useData(): DataContextValue {
             description,
             categoryId: run.category_id || aiDetectedCategoryId || undefined,
             policyOverrides,
-            aspects,
+            // eBay rejects any single item-specific value longer than ~65 characters — a
+            // frequent cause is a comma-joined list (e.g. an AI-generated "Compatible Socket
+            // Types" aspect) crammed into one string instead of separate array entries.
+            // Sanitize right before publish so it's protected regardless of where the
+            // oversized value came from.
+            aspects: sanitizeAspects(aspects),
             amazonPrice: product.price,
           }, { skipRefresh: true })
 
