@@ -1,13 +1,16 @@
-import { useState, useEffect, useMemo, useRef, Fragment } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Search, PackagePlus, Upload, Save, Link2,
   AlertCircle, CheckCircle2, Sparkles, Layers, FileText, Loader2,
-  ShieldAlert, ListChecks, Plus, Trash2, Wand2, X
+  ShieldAlert, ListChecks, Plus, Trash2, Wand2, X,
+  Download, ChevronLeft, ChevronRight, Circle, Ban, Clock,
 } from 'lucide-react'
 import { cn, formatCurrency, calculateEbayPrice, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, type PricingTierInput } from '../lib/utils'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import type { AmazonProduct } from '../lib/useData'
+import type { BulkRun, BulkRunItem } from '../lib/useData'
 
 type Tab = 'single' | 'bulk' | 'bulk-status' | 'drafts' | 'import'
 
@@ -225,8 +228,250 @@ interface CsvMatchRow {
   include: boolean
 }
 
+// ---- Bulk run detail modal ----
+// Opened by clicking a batch row in Bulk Status. Shows every item in that run with its real
+// outcome, split into tabs (All / Success / Blocked / Failed / In progress). "Blocked" is
+// derived purely for display from the error text of a 'failed' item (VeRO/Prime/FBA-only
+// rejections) — the underlying data model (BulkRunItem.status) is untouched, so this is a
+// display-only distinction and carries zero risk to the working publish/retry logic.
+const BLOCK_PATTERNS = /blocked by vero|blocked by your prime filter|not fulfilled by amazon|fba-only|not prime-eligible|filtered out/i
+
+type DetailTab = 'all' | 'success' | 'blocked' | 'failed' | 'pending'
+
+function classifyItem(item: BulkRunItem): DetailTab {
+  if (item.status === 'success') return 'success'
+  if (item.status === 'pending') return 'pending'
+  if (item.error && BLOCK_PATTERNS.test(item.error)) return 'blocked'
+  return 'failed'
+}
+
+function BulkRunDetailModal({
+  run,
+  ebayIdByAsin,
+  onClose,
+}: {
+  run: BulkRun
+  ebayIdByAsin: Map<string, string>
+  onClose: () => void
+}) {
+  const [tab, setTab] = useState<DetailTab>('all')
+  const [search, setSearch] = useState('')
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 50
+
+  const classified = useMemo(() => run.items.map(item => ({ item, cls: classifyItem(item) })), [run.items])
+
+  const counts = useMemo(() => {
+    const c = { all: classified.length, success: 0, blocked: 0, failed: 0, pending: 0 }
+    for (const { cls } of classified) c[cls]++
+    return c
+  }, [classified])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return classified
+      .filter(({ cls }) => tab === 'all' || cls === tab)
+      .filter(({ item }) => !q || item.asin.toLowerCase().includes(q) || (item.title || '').toLowerCase().includes(q))
+      .map(({ item }) => item)
+  }, [classified, tab, search])
+
+  useEffect(() => { setPage(1) }, [tab, search])
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
+  const currentPage = Math.min(page, totalPages)
+  const paged = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+
+  const tabs: { id: DetailTab; label: string; icon: React.ComponentType<{ className?: string }>; color: string }[] = [
+    { id: 'all', label: 'All', icon: Circle, color: 'text-slate-500' },
+    { id: 'success', label: 'Success', icon: CheckCircle2, color: 'text-success-600' },
+    { id: 'blocked', label: 'Blocked', icon: Ban, color: 'text-amber-600' },
+    { id: 'failed', label: 'Failed', icon: AlertCircle, color: 'text-error-600' },
+    { id: 'pending', label: 'In progress', icon: Clock, color: 'text-brand-600' },
+  ]
+
+  function exportCsv() {
+    const rows = [['ASIN', 'Title', 'eBay Item', 'Status', 'Error']]
+    for (const { item, cls } of classified) {
+      rows.push([
+        item.asin,
+        item.title || '',
+        ebayIdByAsin.get(item.asin) || '',
+        cls,
+        (item.error || '').replace(/\s+/g, ' '),
+      ])
+    }
+    const csv = rows.map(r => r.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${run.name.replace(/[^a-z0-9]+/gi, '_')}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+      <div className="w-full max-w-4xl max-h-[85vh] flex flex-col rounded-2xl bg-white shadow-xl border border-slate-200">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+          <div>
+            <h3 className="font-semibold text-slate-900">Bulk run — {run.name}</h3>
+            <p className="text-xs text-slate-400 font-mono mt-0.5">{run.id.slice(0, 8)}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={exportCsv} className="btn-secondary text-sm">
+              <Download className="w-3.5 h-3.5" /> Export to CSV
+            </button>
+            <button onClick={onClose} className="btn-secondary text-sm">Close</button>
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex items-center gap-1 px-5 pt-3 border-b border-slate-100 shrink-0 overflow-x-auto">
+          {tabs.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 whitespace-nowrap transition-colors',
+                tab === t.id ? 'border-brand-600 text-brand-700' : 'border-transparent text-slate-500 hover:text-slate-800',
+              )}
+            >
+              <t.icon className={cn('w-3.5 h-3.5', tab === t.id ? 'text-brand-600' : t.color)} />
+              {t.label} <span className="text-slate-400">({counts[t.id]})</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Search */}
+        <div className="px-5 py-3 border-b border-slate-100 shrink-0">
+          <div className="relative max-w-xs">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              className="input pl-9 text-sm"
+              placeholder="Search ASIN or title…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="flex-1 overflow-y-auto">
+          {paged.length === 0 ? (
+            <div className="p-10 text-center text-sm text-slate-400">No items match this filter.</div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-white">
+                <tr className="border-b border-slate-100 text-left text-xs text-slate-500 uppercase tracking-wider">
+                  <th className="px-5 py-2 font-medium">ASIN</th>
+                  <th className="px-3 py-2 font-medium">Title</th>
+                  <th className="px-3 py-2 font-medium">eBay Item</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paged.map(item => {
+                  const cls = classifyItem(item)
+                  const ebayId = ebayIdByAsin.get(item.asin)
+                  return (
+                    <tr key={item.id} className="border-b border-slate-50 align-top">
+                      <td className="px-5 py-2.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-4 h-4 rounded-full bg-slate-900 text-white text-[9px] font-bold flex items-center justify-center shrink-0">a</span>
+                          <a
+                            href={`https://www.amazon.com/dp/${item.asin}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-xs text-slate-700 hover:text-brand-600"
+                          >
+                            {item.asin}
+                          </a>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5 max-w-[240px]">
+                        <p className="text-slate-800 truncate">{item.title || '—'}</p>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {ebayId ? (
+                          <a
+                            href={`https://www.ebay.com/itm/${ebayId}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-xs text-brand-600 hover:text-brand-700"
+                          >
+                            {ebayId.slice(0, 12)}
+                          </a>
+                        ) : (
+                          <span className="text-slate-300">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {cls === 'success' && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-success-700 bg-success-50 px-2 py-0.5 rounded-full">
+                            <CheckCircle2 className="w-3 h-3" /> Completed
+                          </span>
+                        )}
+                        {cls === 'blocked' && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full">
+                            <Ban className="w-3 h-3" /> Blocked
+                          </span>
+                        )}
+                        {cls === 'failed' && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-error-700 bg-error-50 px-2 py-0.5 rounded-full">
+                            <AlertCircle className="w-3 h-3" /> Failed
+                          </span>
+                        )}
+                        {cls === 'pending' && (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 bg-brand-50 px-2 py-0.5 rounded-full">
+                            <Loader2 className="w-3 h-3 animate-spin" /> In progress
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5 max-w-[280px]">
+                        <p className="text-xs text-slate-500 line-clamp-2">{item.error || ''}</p>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {/* Footer / pagination */}
+        <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500 shrink-0">
+          <span>
+            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filtered.length)} of {filtered.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-ghost text-xs px-2 py-1 flex items-center gap-1 disabled:opacity-40"
+              disabled={currentPage <= 1}
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+            >
+              <ChevronLeft className="w-3.5 h-3.5" /> Prev
+            </button>
+            <span className="text-slate-400">Page {currentPage} of {totalPages}</span>
+            <button
+              className="btn-ghost text-xs px-2 py-1 flex items-center gap-1 disabled:opacity-40"
+              disabled={currentPage >= totalPages}
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            >
+              Next <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 export default function ListItems() {
-  const { stores, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings } = useStoreData()
+  const { stores, listings, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings } = useStoreData()
   const [tab, setTab] = useState<Tab>('single')
   const [asin, setAsin] = useState('')
   const [product, setProduct] = useState<AmazonProduct | null>(null)
@@ -277,6 +522,9 @@ export default function ListItems() {
   const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'completed' | 'failed'>('all')
   const [statusPage, setStatusPage] = useState(1)
   const STATUS_PAGE_SIZE = 20
+  // Which batch's detail modal is open (Bulk Status → click a row). Purely a UI-selection
+  // state — doesn't touch bulkRuns data itself.
+  const [openRunId, setOpenRunId] = useState<string | null>(null)
 
   const [importText, setImportText] = useState('')
   const [importRunning, setImportRunning] = useState(false)
@@ -652,8 +900,11 @@ export default function ListItems() {
       setBulkText('')
       setBulkRunName('')
       setProcessingRunId(run.id)
-      await processBulkRun(run.id)
+      // Jump straight to Bulk Status and open this run's detail modal — the user watches
+      // this exact batch progress live instead of landing on the flat summary table first.
       setTab('bulk-status')
+      setOpenRunId(run.id)
+      await processBulkRun(run.id)
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to start bulk run')
     } finally {
@@ -681,6 +932,19 @@ export default function ListItems() {
   }, [bulkRuns, statusFilter])
   const pagedRuns = filteredRuns.slice((statusPage - 1) * STATUS_PAGE_SIZE, statusPage * STATUS_PAGE_SIZE)
   const totalStatusPages = Math.max(1, Math.ceil(filteredRuns.length / STATUS_PAGE_SIZE))
+
+  // Looks up each successfully-published item's real eBay listing ID by ASIN, from the store's
+  // already-loaded listings — used only to display it in the detail modal (Export CSV / table),
+  // no extra network calls and no changes to how bulk runs are processed or stored.
+  const ebayIdByAsin = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const l of listings) {
+      if (l.asin && l.ebayId) map.set(l.asin, l.ebayId)
+    }
+    return map
+  }, [listings])
+
+  const openRun = openRunId ? bulkRuns.find(r => r.id === openRunId) || null : null
 
   const loadDrafts = async () => {
     if (!activeStore?.id) return
@@ -1267,7 +1531,7 @@ export default function ListItems() {
           <div className="card-header flex items-center justify-between flex-wrap gap-3">
             <div>
               <h3 className="font-semibold text-slate-900">Bulk listings</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Every bulk run, with live progress and per-item failure reasons.</p>
+              <p className="text-xs text-slate-500 mt-0.5">Every bulk run. Click a batch to see which ASINs completed, were blocked, or failed — and why.</p>
             </div>
             <select
               className="input w-auto text-sm"
@@ -1302,53 +1566,45 @@ export default function ListItems() {
                     </thead>
                     <tbody className="divide-y divide-slate-50">
                       {pagedRuns.map(run => (
-                        <Fragment key={run.id}>
-                          <tr className="hover:bg-slate-50">
-                            <td className="py-2.5 pl-4 pr-2">
-                              <p className="font-medium text-slate-800">{run.name}</p>
-                              <p className="text-xs text-slate-400 font-mono">{run.id.slice(0, 8)}</p>
-                            </td>
-                            <td className="py-2.5 px-2 text-slate-600 whitespace-nowrap">{stores.find(s => s.id === run.storeId)?.nickname || '—'}</td>
-                            <td className="py-2.5 px-2 text-slate-500 whitespace-nowrap">{new Date(run.createdAt).toLocaleString()}</td>
-                            <td className="py-2.5 px-2 text-slate-500 whitespace-nowrap">{run.completedAt ? new Date(run.completedAt).toLocaleString() : '—'}</td>
-                            <td className="py-2.5 px-2 text-slate-600 whitespace-nowrap">{run.succeeded + run.failed} / {run.total}</td>
-                            <td className="py-2.5 px-2 text-emerald-600 font-medium">{run.succeeded}</td>
-                            <td className="py-2.5 px-2 text-red-500 font-medium">{run.failed}</td>
-                            <td className="py-2.5 px-2">
-                              <span className={cn(
-                                'text-xs font-medium px-2 py-0.5 rounded-full',
-                                run.status === 'completed' && 'bg-emerald-50 text-emerald-700',
-                                run.status === 'failed' && 'bg-red-50 text-red-700',
-                                (run.status === 'running' || run.status === 'paused') && 'bg-amber-50 text-amber-700',
-                              )}>{run.status}</span>
-                            </td>
-                            <td className="py-2.5 pr-4 pl-2 text-right whitespace-nowrap">
-                              {run.status !== 'completed' && (
-                                <button
-                                  onClick={() => void handleResumeBulkRun(run.id)}
-                                  disabled={processingRunId === run.id}
-                                  className="text-xs font-medium text-brand-600 hover:text-brand-700 mr-3"
-                                >
-                                  {processingRunId === run.id ? 'Processing…' : 'Resume'}
-                                </button>
-                              )}
-                              <button onClick={() => void deleteBulkRun(run.id)} className="text-slate-400 hover:text-red-500" title="Delete run">
-                                <Trash2 className="w-4 h-4 inline" />
+                        <tr
+                          key={run.id}
+                          className="hover:bg-slate-50 cursor-pointer"
+                          onClick={() => setOpenRunId(run.id)}
+                          title="Click to see per-item results"
+                        >
+                          <td className="py-2.5 pl-4 pr-2">
+                            <p className="font-medium text-slate-800">{run.name}</p>
+                            <p className="text-xs text-slate-400 font-mono">{run.id.slice(0, 8)}</p>
+                          </td>
+                          <td className="py-2.5 px-2 text-slate-600 whitespace-nowrap">{stores.find(s => s.id === run.storeId)?.nickname || '—'}</td>
+                          <td className="py-2.5 px-2 text-slate-500 whitespace-nowrap">{new Date(run.createdAt).toLocaleString()}</td>
+                          <td className="py-2.5 px-2 text-slate-500 whitespace-nowrap">{run.completedAt ? new Date(run.completedAt).toLocaleString() : '—'}</td>
+                          <td className="py-2.5 px-2 text-slate-600 whitespace-nowrap">{run.succeeded + run.failed} / {run.total}</td>
+                          <td className="py-2.5 px-2 text-emerald-600 font-medium">{run.succeeded}</td>
+                          <td className="py-2.5 px-2 text-red-500 font-medium">{run.failed}</td>
+                          <td className="py-2.5 px-2">
+                            <span className={cn(
+                              'text-xs font-medium px-2 py-0.5 rounded-full',
+                              run.status === 'completed' && 'bg-emerald-50 text-emerald-700',
+                              run.status === 'failed' && 'bg-red-50 text-red-700',
+                              (run.status === 'running' || run.status === 'paused') && 'bg-amber-50 text-amber-700',
+                            )}>{run.status}</span>
+                          </td>
+                          <td className="py-2.5 pr-4 pl-2 text-right whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                            {run.status !== 'completed' && (
+                              <button
+                                onClick={() => void handleResumeBulkRun(run.id)}
+                                disabled={processingRunId === run.id}
+                                className="text-xs font-medium text-brand-600 hover:text-brand-700 mr-3"
+                              >
+                                {processingRunId === run.id ? 'Processing…' : 'Resume'}
                               </button>
-                            </td>
-                          </tr>
-                          {run.items.some(i => i.status === 'failed') && (
-                            <tr>
-                              <td colSpan={9} className="px-4 pb-3">
-                                <div className="text-xs bg-red-50 rounded-lg p-2 space-y-1">
-                                  {run.items.filter(i => i.status === 'failed').slice(0, 5).map(i => (
-                                    <p key={i.id} className="text-red-600 truncate"><span className="font-mono">{i.asin}</span> — {i.error}</p>
-                                  ))}
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
+                            )}
+                            <button onClick={() => void deleteBulkRun(run.id)} className="text-slate-400 hover:text-red-500" title="Delete run">
+                              <Trash2 className="w-4 h-4 inline" />
+                            </button>
+                          </td>
+                        </tr>
                       ))}
                     </tbody>
                   </table>
@@ -1638,6 +1894,14 @@ export default function ListItems() {
             </div>
           )}
         </div>
+      )}
+
+      {openRun && (
+        <BulkRunDetailModal
+          run={openRun}
+          ebayIdByAsin={ebayIdByAsin}
+          onClose={() => setOpenRunId(null)}
+        />
       )}
     </div>
   )
