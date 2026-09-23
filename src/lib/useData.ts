@@ -9,6 +9,10 @@ import type {
 // Mock data removed — the app now shows real data from the database or empty states.
 import type { Store, Listing, Order, Conversation, Revision, Message } from '../data/types'
 
+// How many bulk items are processed at the same time. The Amazon VPS scraper accepts the same
+// number in parallel (MAX_CONCURRENT in its .env) — keep the two in step.
+const BULK_CONCURRENCY = 4
+
 export interface UpdateListingPayload {
   sku: string
   title?: string
@@ -115,7 +119,7 @@ export interface DataContextValue {
   syncStore: (storeId: string) => Promise<void>
   disconnectStore: (storeId: string) => Promise<void>
   updateListing: (storeId: string, payload: UpdateListingPayload) => Promise<void>
-  publishListing: (storeId: string, payload: PublishListingPayload) => Promise<string>
+  publishListing: (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean }) => Promise<string>
   fetchAmazonProduct: (input: string, storeId?: string) => Promise<AmazonProduct>
   bulkRuns: BulkRun[]
   createBulkRun: (input: CreateBulkRunInput) => Promise<BulkRun>
@@ -407,7 +411,7 @@ export function useData(): DataContextValue {
     }
   }, [])
 
-  const publishListing = useCallback(async (storeId: string, payload: PublishListingPayload) => {
+  const publishListing = useCallback(async (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean }) => {
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/publish`
     const res = await fetch(syncUrl, {
       method: 'POST',
@@ -416,7 +420,10 @@ export function useData(): DataContextValue {
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; listingId?: string; error?: string }
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to publish listing to eBay')
-    await refresh()
+    // Bulk runs skip this and refresh once at the very end — reloading the whole app's data
+    // (listings, orders, every conversation's messages, every bulk run's items) after EVERY
+    // single published item was a large hidden delay per item.
+    if (!opts?.skipRefresh) await refresh()
     return data.listingId || ''
   }, [refresh])
 
@@ -518,12 +525,11 @@ export function useData(): DataContextValue {
       fixProfit: Number(r.fixed_profit) || 0,
     }))
 
-    let succeeded = 0
-    let failed = 0
+    // Counters continue from what's already stored, so resuming a run doesn't reset them.
+    let succeeded = run.succeeded || 0
+    let failed = run.failed || 0
 
-    for (const item of items) {
-      if (item.status !== 'pending') continue
-
+    const processItem = async (item: BulkRunItemRow): Promise<void> => {
       let processedStatus: BulkRunItem['status'] = 'failed'
       let processedTitle: string | null = item.title
       let processedImage: string | null = item.image
@@ -568,7 +574,7 @@ export function useData(): DataContextValue {
           }
         }
 
-        let description = fitDescriptionToBudget(listingTemplate, {
+        const description = fitDescriptionToBudget(listingTemplate, {
           title,
           store_name: templateStoreName,
           main_image: product.mainImage || product.images[0] || '',
@@ -614,7 +620,7 @@ export function useData(): DataContextValue {
             policyOverrides,
             aspects,
             amazonPrice: product.price,
-          })
+          }, { skipRefresh: true })
 
           // Promoted Listings: best-effort — eBay eligibility (sales history, category, etc.)
           // can reject this even when the call itself succeeds, so failures here never fail the item.
@@ -661,9 +667,25 @@ export function useData(): DataContextValue {
       ))
     }
 
+    // Worker pool: several items are processed at the same time instead of strictly one after
+    // another. Each worker keeps taking the next pending item until none are left.
+    const pending = items.filter(i => i.status === 'pending')
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const item = pending[cursor++]
+        await processItem(item)
+      }
+    }
+    await Promise.all(
+      Array.from({ length: Math.min(BULK_CONCURRENCY, pending.length) }, () => worker())
+    )
+
     const finalStatus = failed === items.length && items.length > 0 ? 'failed' : 'completed'
     const completedAt = new Date().toISOString()
     await supabase.from('bulk_runs').update({
+      succeeded,
+      failed,
       status: finalStatus,
       updated_at: completedAt,
       completed_at: completedAt,
