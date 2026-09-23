@@ -464,7 +464,14 @@ export function useData(): DataContextValue {
       .select('*')
     if (itemsError) throw new Error(itemsError.message)
 
-    return mapBulkRunRow(runRow as BulkRunRow, (insertedItems || []) as BulkRunItemRow[])
+    const newRun = mapBulkRunRow(runRow as BulkRunRow, (insertedItems || []) as BulkRunItemRow[])
+    // Add the new run to local state immediately, not just the database — otherwise the UI
+    // (e.g. a "jump straight to this run's detail view" flow right after creating it) has
+    // nothing to find until the next full refresh(), which previously only happened at the
+    // very end of processBulkRun, making the detail view appear to do nothing until the whole
+    // batch had already finished.
+    setBulkRuns(prev => [newRun, ...prev])
+    return newRun
   }, [])
 
   const processBulkRun = useCallback(async (runId: string): Promise<void> => {
