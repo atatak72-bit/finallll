@@ -150,6 +150,14 @@ export function extractBasicAspectsFromSpecs(specs?: Record<string, string | num
     const hit = entries.find(([k]) => k === wanted)
     if (hit && hit[1]) { out.MPN = [hit[1]]; break }
   }
+
+  // Many eBay categories require a Model value to publish at all, but plenty of real Amazon
+  // products (generic/unbranded parts especially) simply don't list one anywhere. "Does not
+  // apply" is eBay's own standard, accepted value for this situation — the same convention
+  // already used for Brand — so Model always gets SOME value rather than leaving the listing
+  // unpublishable whenever Amazon's spec table doesn't happen to have this field.
+  if (!out.Model) out.Model = ["Does not apply"]
+
   return out
 }
 
