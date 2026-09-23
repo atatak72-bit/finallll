@@ -103,6 +103,55 @@ export async function proxyImageUrls(urls: string[]): Promise<string[]> {
   }
 }
 
+// eBay item titles are capped at 80 characters. Shared here so both the Single-add UI and the
+// Bulk pipeline (which previously sent the raw, untruncated Amazon title straight to eBay) use
+// the exact same word-safe truncation instead of two copies drifting apart.
+export function truncateTitleTo80(title: string): string {
+  if (!title) return ''
+  let t = title.trim()
+  if (t.length <= 80) return t
+  t = t.slice(0, 80)
+  const lastSpace = t.lastIndexOf(' ')
+  if (lastSpace > 60) t = t.slice(0, lastSpace)
+  return t.trim()
+}
+
+// eBay rejects any single item-specific (aspect) value longer than ~65 characters. A common
+// real-world cause is a comma-separated list that got crammed into one string instead of
+// separate array entries (e.g. an AI- or spec-table-derived "Compatible Socket Types" value
+// like "1157, 2057, 2357, 7528, ..."). Rather than truncating and silently losing most of the
+// list, this splits any oversized value on commas into individual values first, and only
+// hard-truncates a piece that is still too long on its own. Applied right before publish so it
+// protects every source (AI-generated aspects, Amazon spec-table extraction, manual entry)
+// regardless of where the oversized value originated.
+const EBAY_ASPECT_VALUE_MAX = 65
+const EBAY_ASPECT_MAX_VALUES = 30
+
+export function sanitizeAspects(aspects?: Record<string, string[]>): Record<string, string[]> | undefined {
+  if (!aspects) return aspects
+  const out: Record<string, string[]> = {}
+  for (const [key, values] of Object.entries(aspects)) {
+    if (!Array.isArray(values)) continue
+    const expanded: string[] = []
+    for (const raw of values) {
+      const str = String(raw ?? '').trim()
+      if (!str) continue
+      if (str.length <= EBAY_ASPECT_VALUE_MAX) {
+        expanded.push(str)
+        continue
+      }
+      const pieces = str.split(',').map(p => p.trim()).filter(Boolean)
+      for (const p of pieces) {
+        expanded.push(p.length <= EBAY_ASPECT_VALUE_MAX ? p : p.slice(0, EBAY_ASPECT_VALUE_MAX).trim())
+      }
+    }
+    if (expanded.length > 0) {
+      out[key] = Array.from(new Set(expanded)).slice(0, EBAY_ASPECT_MAX_VALUES)
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 // Builds a polished, distinctly-branded HTML listing description (header bar with store
 // name, trust badge strip, key features checklist, image gallery, description, and a
 // card-style footer with About/Shipping/Returns/Satisfaction) from raw Amazon product data.
@@ -292,11 +341,13 @@ export const DEFAULT_LISTING_TEMPLATE = `<div style="user-select:none;-webkit-us
 
 // eBay's inventory item "description" field has a hard 4000-character limit. Our branded
 // template's fixed markup (header, badges, footer cards, etc.) already uses a meaningful
-// chunk of that budget, so instead of letting the whole render blow past the limit (and
-// risk eBay rejecting the listing, or worse, truncating raw HTML mid-tag), this measures
-// the template's fixed overhead first and trims only the flexible part — the actual
-// product_description text — to whatever room is left. Bullets/title/images stay intact.
+// chunk of that budget, so instead of letting the whole render blow past the limit, this
+// trims the flexible part — the actual product_description text — to whatever room is left.
+// Bullets/title/images stay intact (bullets are individually capped first, since real Amazon
+// feature bullets can themselves be long enough to blow the budget before any description
+// text is even added).
 function truncateWordSafe(text: string, maxLen: number): string {
+  if (maxLen <= 0) return ''
   if (text.length <= maxLen) return text
   let t = text.slice(0, maxLen)
   const lastSpace = t.lastIndexOf(' ')
@@ -309,21 +360,45 @@ export function fitDescriptionToBudget(
   data: Record<string, unknown>,
   maxTotal = 4000,
 ): string {
-  const margin = 50
-
-  // Bullets themselves (not just the description) can be arbitrarily long/numerous — real
-  // Amazon feature bullets are often full sentences, and several of them can already exceed
-  // eBay's 4000-char cap on their own, before any description text is even added. Cap them
-  // first so the "fixed" part of the template (everything except the description) can never
-  // run away on its own.
   const rawBullets = Array.isArray(data.feature_bullets) ? (data.feature_bullets as unknown[]).map(String) : []
   const cappedBullets = rawBullets.slice(0, 6).map(b => truncateWordSafe(b, 110))
   const safeData = { ...data, feature_bullets: cappedBullets }
-
-  const withoutDesc = renderListingTemplate(template, { ...safeData, product_description: '' })
-  const budget = Math.max(0, maxTotal - withoutDesc.length - margin)
   const rawDesc = String(data.product_description || '')
-  const trimmedDesc = rawDesc.length > budget ? truncateWordSafe(rawDesc, budget) : rawDesc
 
-  return renderListingTemplate(template, { ...safeData, product_description: trimmedDesc })
+  // Common case: the description already fits once bullets are capped — no need to guess at
+  // a budget up front (which is what previously under-counted the wrapper markup that only
+  // appears once product_description is non-empty, letting a few oversized listings slip
+  // past the 4000-char limit and get rejected by eBay).
+  const fullRender = renderListingTemplate(template, { ...safeData, product_description: rawDesc })
+  if (fullRender.length <= maxTotal) return fullRender
+
+  // Binary-search the longest word-safe prefix of the description whose FULL rendered output
+  // (including whatever wrapper markup this template adds around a non-empty description)
+  // fits within maxTotal. This is robust to any template's specific markup overhead instead
+  // of trying to predict it, and self-corrects if the template itself changes later.
+  let lo = 0
+  let hi = rawDesc.length
+  let best = ''
+  for (let i = 0; i < 24 && lo <= hi; i++) {
+    const mid = Math.floor((lo + hi) / 2)
+    const trimmed = truncateWordSafe(rawDesc, mid)
+    const attempt = renderListingTemplate(template, { ...safeData, product_description: trimmed })
+    if (attempt.length <= maxTotal) {
+      best = trimmed
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+
+  let result = renderListingTemplate(template, { ...safeData, product_description: best })
+
+  // Extreme fallback: even with an empty description, the fixed skeleton itself (very long
+  // title + bullets) exceeds maxTotal. Hard-cut as a last resort so eBay's length check never
+  // fails outright — exceedingly rare given bullets/title are already capped elsewhere.
+  if (result.length > maxTotal) {
+    result = result.slice(0, maxTotal)
+  }
+
+  return result
 }
