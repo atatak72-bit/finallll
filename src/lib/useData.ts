@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice, truncateTitleTo80, sanitizeAspects } from './utils'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice, truncateTitleTo80, sanitizeAspects, extractBasicAspectsFromSpecs } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
@@ -525,9 +525,13 @@ export function useData(): DataContextValue {
       fixProfit: Number(r.fixed_profit) || 0,
     }))
 
-    // Counters continue from what's already stored, so resuming a run doesn't reset them.
-    let succeeded = run.succeeded || 0
-    let failed = run.failed || 0
+    // Recomputed fresh from each item's current stored status every time this runs, rather
+    // than trusting the run row's persisted succeeded/failed counts — this is what makes
+    // "Resume" self-correcting: previously-failed items are retried below (not just
+    // never-attempted ones), so their outcome needs to be counted fresh, not carried over
+    // from a stale failure.
+    let succeeded = items.filter(i => i.status === 'success').length
+    let failed = 0
 
     const processItem = async (item: BulkRunItemRow): Promise<void> => {
       let processedStatus: BulkRunItem['status'] = 'failed'
@@ -626,8 +630,11 @@ export function useData(): DataContextValue {
             // frequent cause is a comma-joined list (e.g. an AI-generated "Compatible Socket
             // Types" aspect) crammed into one string instead of separate array entries.
             // Sanitize right before publish so it's protected regardless of where the
-            // oversized value came from.
-            aspects: sanitizeAspects(aspects),
+            // oversized value came from. Also fill in Model/MPN from Amazon's raw spec table
+            // (independent of the AI Titles toggle) without overwriting anything AI already
+            // provided — many eBay categories require a Model value to publish at all, and
+            // previously that only ever got filled in when AI Titles happened to be on.
+            aspects: sanitizeAspects({ ...extractBasicAspectsFromSpecs(product.specs), ...(aspects || {}) }),
             amazonPrice: product.price,
           }, { skipRefresh: true })
 
@@ -677,17 +684,20 @@ export function useData(): DataContextValue {
     }
 
     // Worker pool: several items are processed at the same time instead of strictly one after
-    // another. Each worker keeps taking the next pending item until none are left.
-    const pending = items.filter(i => i.status === 'pending')
+    // another. "Resume" retries BOTH never-attempted ('pending') items AND previously-failed
+    // ('failed') ones — the old behavior of only picking up 'pending' items meant Resume did
+    // nothing for a batch that had already failed once, even after the actual bug causing the
+    // failures (a description/aspect validation issue, say) had been fixed in the meantime.
+    const toRetry = items.filter(i => i.status === 'pending' || i.status === 'failed')
     let cursor = 0
     const worker = async () => {
-      while (cursor < pending.length) {
-        const item = pending[cursor++]
+      while (cursor < toRetry.length) {
+        const item = toRetry[cursor++]
         await processItem(item)
       }
     }
     await Promise.all(
-      Array.from({ length: Math.min(BULK_CONCURRENCY, pending.length) }, () => worker())
+      Array.from({ length: Math.min(BULK_CONCURRENCY, toRetry.length) }, () => worker())
     )
 
     const finalStatus = failed === items.length && items.length > 0 ? 'failed' : 'completed'
