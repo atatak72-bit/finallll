@@ -148,6 +148,7 @@ const FALLBACK_ASPECT_SPEC_KEYS: Record<string, string[]> = {
   Color: ["color", "colour"],
   Type: ["type", "style"],
   "Compatible Brand": ["compatible brand", "compatible make", "fits brand", "compatible with"],
+  "Compatible Model": ["compatible model", "compatible models", "fits model", "for model"],
 }
 
 export function extractBasicAspectsFromSpecs(specs?: Record<string, string | number> | null): Record<string, string[]> {
