@@ -9,9 +9,12 @@ import type {
 // Mock data removed — the app now shows real data from the database or empty states.
 import type { Store, Listing, Order, Conversation, Revision, Message } from '../data/types'
 
-// How many bulk items are processed at the same time. The Amazon VPS scraper accepts the same
-// number in parallel (MAX_CONCURRENT in its .env) — keep the two in step.
-const BULK_CONCURRENCY = 4
+// How many bulk items are processed at the same time. Must match the VPS scraper's own
+// MAX_CONCURRENT (its .env) — the VPS server is single-core, so more than 2 browsers running
+// at once starves some of them of CPU time and causes real page-load timeouts, not just a
+// queueing delay. Lower this only if MAX_CONCURRENT is lowered too; raise it only after the
+// VPS is upgraded to more CPU cores.
+const BULK_CONCURRENCY = 2
 
 export interface UpdateListingPayload {
   sku: string
