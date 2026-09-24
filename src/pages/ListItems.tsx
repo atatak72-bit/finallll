@@ -509,7 +509,10 @@ export default function ListItems() {
   const [bulkAllowVero, setBulkAllowVero] = useState(false)
   const [bulkStarting, setBulkStarting] = useState<'live' | 'draft' | null>(null)
   const [bulkError, setBulkError] = useState<string | null>(null)
-  const [processingRunId, setProcessingRunId] = useState<string | null>(null)
+  // Which bulk runs are currently being processed in the background — a list, not a
+  // single id, since multiple runs can now process concurrently (starting a new batch no
+  // longer waits for a previous one to finish).
+  const [activeRunIds, setActiveRunIds] = useState<string[]>([])
   const [batchPolicies, setBatchPolicies] = useState<{
     payment: { id: string; name: string }[]
     fulfillment: { id: string; name: string }[]
@@ -899,29 +902,35 @@ export default function ListItems() {
       })
       setBulkText('')
       setBulkRunName('')
-      setProcessingRunId(run.id)
       // Jump straight to Bulk Status and open this run's detail modal — the user watches
       // this exact batch progress live instead of landing on the flat summary table first.
       setTab('bulk-status')
       setOpenRunId(run.id)
-      await processBulkRun(run.id)
+      setActiveRunIds(prev => [...prev, run.id])
+      // Deliberately NOT awaited: processing continues in the background so the "Add & List
+      // All" button on the Bulk tab is usable again immediately, letting another batch be
+      // queued right away instead of waiting for this one to finish. Runs process
+      // concurrently — each is scoped to its own run's items in the database, so they don't
+      // interfere with each other.
+      void processBulkRun(run.id)
+        .catch(err => setBulkError(err instanceof Error ? err.message : 'Failed to process bulk run'))
+        .finally(() => setActiveRunIds(prev => prev.filter(id => id !== run.id)))
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to start bulk run')
     } finally {
-      setProcessingRunId(null)
       setBulkStarting(null)
     }
   }
 
   const handleResumeBulkRun = async (runId: string) => {
-    setProcessingRunId(runId)
     setBulkError(null)
+    setActiveRunIds(prev => prev.includes(runId) ? prev : [...prev, runId])
     try {
       await processBulkRun(runId)
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to process bulk run')
     } finally {
-      setProcessingRunId(null)
+      setActiveRunIds(prev => prev.filter(id => id !== runId))
     }
   }
 
@@ -1594,10 +1603,10 @@ export default function ListItems() {
                             {run.status !== 'completed' && (
                               <button
                                 onClick={() => void handleResumeBulkRun(run.id)}
-                                disabled={processingRunId === run.id}
+                                disabled={activeRunIds.includes(run.id)}
                                 className="text-xs font-medium text-brand-600 hover:text-brand-700 mr-3"
                               >
-                                {processingRunId === run.id ? 'Processing…' : 'Resume'}
+                                {activeRunIds.includes(run.id) ? 'Processing…' : 'Resume'}
                               </button>
                             )}
                             <button onClick={() => void deleteBulkRun(run.id)} className="text-slate-400 hover:text-red-500" title="Delete run">
