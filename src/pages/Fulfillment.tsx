@@ -4,7 +4,7 @@ import { cn } from '../lib/utils'
 
 export default function Fulfillment() {
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="max-w-3xl space-y-6">
       <div className="card">
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">Connect an Amazon Account</h3>
