@@ -507,6 +507,7 @@ export function useData(): DataContextValue {
       .from('listing_templates')
       .select('template')
       .eq('store_id', run.store_id)
+      .eq('is_active', true)
       .maybeSingle()
     const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
 
@@ -596,6 +597,10 @@ export function useData(): DataContextValue {
           title,
           store_name: templateStoreName,
           main_image: product.mainImage || product.images[0] || '',
+          // Extra product photos beyond the main one, for templates with a supporting gallery
+          // strip. Static only — no click-to-swap, since eBay's Active Content Policy blocks
+          // JavaScript in listing descriptions (eBay's own native gallery already covers that).
+          gallery: (product.images || []).slice(1, 6),
           product_description: aiDescription || product.description,
           feature_bullets: product.bulletPoints,
         })
