@@ -181,7 +181,6 @@ function EbayPoliciesSection() {
         ])
         if (cancelled) return
 
-        // Policies: gracefully fall back to empty arrays on error so the UI never crashes.
         const polData = (polResult.data || {}) as Partial<PoliciesResponse> & { error?: string }
         if (polResult.error || polData.error) {
           setPolicies({ paymentPolicies: [], returnPolicies: [], fulfillmentPolicies: [] })
@@ -194,7 +193,6 @@ function EbayPoliciesSection() {
           })
         }
 
-        // Settings: load saved policy IDs + location from database.
         const settingsData = (settingsResult.data || {}) as { settings: StoreSettings | null }
         const s = settingsData.settings
         if (s) {
@@ -397,7 +395,6 @@ function EbayPoliciesSection() {
   return (
     <>
       <div className="space-y-3">
-        {/* Your stores */}
         <SettingsAccordion title="Your stores" open>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -434,7 +431,6 @@ function EbayPoliciesSection() {
           </div>
         </SettingsAccordion>
 
-        {/* Business policies & location */}
         <SettingsAccordion title="Business policies & location" open>
           <div className="space-y-4">
             <p className="text-xs text-slate-500">
@@ -451,7 +447,6 @@ function EbayPoliciesSection() {
               <div className="p-6 text-center text-sm text-slate-500">Loading policies from eBay…</div>
             ) : (
               <>
-                {/* Policies row */}
                 <div className="grid gap-3 md:grid-cols-3">
                   <PolicyDropdown
                     icon={Truck}
@@ -486,7 +481,6 @@ function EbayPoliciesSection() {
 
                 <hr className="border-slate-200" />
 
-                {/* Item location */}
                 <div className="space-y-3">
                   <p className="text-xs font-semibold text-slate-700">Item location</p>
                   <div>
@@ -515,8 +509,6 @@ function EbayPoliciesSection() {
           </div>
         </SettingsAccordion>
 
-        {/* Default eBay category — a separate box since eBay still requires a category to publish,
-            even though it isn't part of the reference layout above. */}
         <SettingsAccordion title="Default eBay category">
           <div className="space-y-3">
             <p className="text-xs text-slate-500">Used automatically whenever a product is listed without its own category. Search by product type (e.g. "wireless earbuds"). eBay requires a category to publish any listing.</p>
@@ -614,443 +606,194 @@ function PolicyDropdown({
   )
 }
 
-interface PricingTier {
-  id: string
-  min: number
-  max: number
-  profitPct: number
-  fixProfit: number
+const FEE_PRESETS: Record<string, { pct: number; fixed: number; label: string }> = {
+  US: { pct: 13.25, fixed: 0.30, label: 'United States' },
+  GB: { pct: 12.8, fixed: 0.30, label: 'United Kingdom' },
+  DE: { pct: 12.5, fixed: 0.35, label: 'Germany' },
 }
 
-const FEE_PRESETS = [
-  { label: 'United States', flag: 'US', pct: 13.25, fixed: 0.30 },
-  { label: 'Turkey', flag: 'TR', pct: 17.88, fixed: 0.36 },
-] as const
-
-function genId(): string {
-  return typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `tier-${Date.now()}-${Math.random().toString(36).slice(2)}`
+function genId() {
+  return Math.random().toString(36).slice(2, 10)
 }
 
-export function PricingSection() {
+type PricingTierRow = { id: string; min: string; max: string; profitPct: string; fixProfit: string }
+
+function PricingSection() {
   const { stores } = useStoreData()
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
   const [pricingEnabled, setPricingEnabled] = useState(true)
-  const [tiers, setTiers] = useState<PricingTier[]>([])
-  const [eBayFeePct, setEBayFeePct] = useState(13.25)
-  const [eBayFixedFee, setEBayFixedFee] = useState(0.30)
-  const [exampleSource, setExampleSource] = useState(10)
+  const [pctFee, setPctFee] = useState('13.25')
+  const [fixedFee, setFixedFee] = useState('0.30')
+  const [tiers, setTiers] = useState<PricingTierRow[]>([
+    { id: genId(), min: '0', max: '25', profitPct: '30', fixProfit: '0' },
+    { id: genId(), min: '25', max: '100', profitPct: '20', fixProfit: '0' },
+    { id: genId(), min: '100', max: '999999', profitPct: '15', fixProfit: '0' },
+  ])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-  const [activePreset, setActivePreset] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
-  }, [toast])
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
-    async function loadSettings() {
+    async function load() {
       const [settingsRes, tiersRes] = await Promise.all([
         supabase.from('pricing_settings').select('*').eq('store_id', activeStore!.id).maybeSingle(),
         supabase.from('pricing_rules').select('*').eq('store_id', activeStore!.id).order('sort_order', { ascending: true }),
       ])
       if (cancelled) return
-
       if (settingsRes.data) {
         setPricingEnabled(settingsRes.data.pricing_enabled ?? true)
-        setEBayFeePct(Number(settingsRes.data.ebay_percentage_fee) || 13.25)
-        setEBayFixedFee(Number(settingsRes.data.ebay_fixed_fee) || 0.30)
-        setExampleSource(Number(settingsRes.data.example_source_price) || 10)
-      } else {
-        setPricingEnabled(true)
-        setEBayFeePct(13.25)
-        setEBayFixedFee(0.30)
-        setExampleSource(10)
+        setPctFee(String(settingsRes.data.ebay_percentage_fee ?? '13.25'))
+        setFixedFee(String(settingsRes.data.ebay_fixed_fee ?? '0.30'))
       }
-
-      // No auto-filled defaults here on purpose: a brand-new store starts with ZERO profit
-      // ranges, not a pre-populated 4-tier example. Pricing must be something the person sets
-      // deliberately per store, never inherited or assumed — this is what previously let a
-      // stray "27" meant for the profit column end up looking like it belonged to the eBay
-      // fee column instead, since both areas were pre-filled with plausible-looking numbers.
-      setTiers((tiersRes.data || []).map(r => ({
-        id: r.id,
-        min: Number(r.min_price) || 0,
-        max: Number(r.max_price) || 999999,
-        profitPct: Number(r.profit_pct) || 20,
-        fixProfit: Number(r.fixed_profit) || 0,
-      })))
-
-      const matchedPreset = FEE_PRESETS.find(p =>
-        Number(p.pct) === Number(settingsRes.data?.ebay_percentage_fee) &&
-        Number(p.fixed) === Number(settingsRes.data?.ebay_fixed_fee),
-      )
-      setActivePreset(matchedPreset ? matchedPreset.label : null)
-
+      if (tiersRes.data && tiersRes.data.length > 0) {
+        setTiers(tiersRes.data.map(t => ({
+          id: t.id,
+          min: String(t.min_price),
+          max: String(t.max_price),
+          profitPct: String(t.profit_pct),
+          fixProfit: String(t.fixed_profit),
+        })))
+      }
       setLoading(false)
     }
-
-    void loadSettings()
+    void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  function updateTier(id: string, patch: Partial<PricingTier>) {
-    setTiers(prev => {
-      const next = prev.map(t => t.id === id ? { ...t, ...patch } : t)
-      const idx = next.findIndex(t => t.id === id)
-      if (idx !== -1 && patch.max !== undefined && idx < next.length - 1) {
-        next[idx + 1] = { ...next[idx + 1], min: patch.max }
-      }
-      return next
-    })
-  }
-
-  function deleteTier(id: string) {
-    setTiers(prev => {
-      const next = prev.filter(t => t.id !== id)
-      for (let i = 1; i < next.length; i++) {
-        next[i] = { ...next[i], min: next[i - 1].max }
-      }
-      return next
-    })
+  function applyPreset(code: string) {
+    const preset = FEE_PRESETS[code]
+    if (!preset) return
+    setPctFee(String(preset.pct))
+    setFixedFee(String(preset.fixed))
   }
 
   function addTier() {
-    setTiers(prev => {
-      const lastMax = prev.length > 0 ? prev[prev.length - 1].max : 0
-      return [...prev, { id: genId(), min: lastMax, max: 999999, profitPct: 20, fixProfit: 0.30 }]
-    })
+    setTiers(prev => [...prev, { id: genId(), min: '0', max: '0', profitPct: '20', fixProfit: '0' }])
+  }
+  function removeTier(id: string) {
+    setTiers(prev => prev.filter(t => t.id !== id))
+  }
+  function updateTier(id: string, field: keyof PricingTierRow, value: string) {
+    setTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: value } : t))
   }
 
-  function applyPreset(preset: typeof FEE_PRESETS[number]) {
-    setEBayFeePct(preset.pct)
-    setEBayFixedFee(preset.fixed)
-    setActivePreset(preset.label)
-  }
-
-  async function persistAll(storeIds: string[]) {
-    const now = new Date().toISOString()
-    const tierRows = tiers.map((t, i) => ({
-      min_price: t.min,
-      max_price: t.max,
-      profit_pct: t.profitPct,
-      fixed_profit: t.fixProfit,
-      sort_order: i,
-      updated_at: now,
-    }))
-
-    for (const sid of storeIds) {
-      // Upsert pricing settings
+  async function saveAll() {
+    if (!activeStore?.id) return
+    setSaving(true)
+    setMessage(null)
+    setError(null)
+    try {
       const { error: settingsErr } = await supabase.from('pricing_settings').upsert({
-        store_id: sid,
+        store_id: activeStore.id,
         pricing_enabled: pricingEnabled,
-        ebay_percentage_fee: eBayFeePct,
-        ebay_fixed_fee: eBayFixedFee,
-        example_source_price: exampleSource,
-        updated_at: now,
+        ebay_percentage_fee: Number(pctFee) || 0,
+        ebay_fixed_fee: Number(fixedFee) || 0,
       }, { onConflict: 'store_id' })
       if (settingsErr) throw new Error(settingsErr.message)
 
-      // Delete existing tiers, then insert fresh set
-      const { error: delErr } = await supabase.from('pricing_rules').delete().eq('store_id', sid)
-      if (delErr) throw new Error(delErr.message)
-
-      if (tierRows.length > 0) {
-        const insertRows = tierRows.map(r => ({ ...r, store_id: sid }))
-        const { error: insErr } = await supabase.from('pricing_rules').insert(insertRows)
-        if (insErr) throw new Error(insErr.message)
+      await supabase.from('pricing_rules').delete().eq('store_id', activeStore.id)
+      if (tiers.length > 0) {
+        const { error: tiersErr } = await supabase.from('pricing_rules').insert(
+          tiers.map((t, idx) => ({
+            store_id: activeStore.id,
+            min_price: Number(t.min) || 0,
+            max_price: Number(t.max) || 0,
+            profit_pct: Number(t.profitPct) || 0,
+            fixed_profit: Number(t.fixProfit) || 0,
+            sort_order: idx,
+          }))
+        )
+        if (tiersErr) throw new Error(tiersErr.message)
       }
-    }
-  }
-
-  async function saveSettings(forAllStores = false) {
-    if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
-    setToast(null)
-
-    try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistAll(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `Pricing settings saved for all ${storeIds.length} connected stores.`
-          : 'Pricing settings saved.',
-      })
+      setMessage('Pricing rules saved.')
     } catch (err) {
-      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save pricing settings.' })
+      setError(err instanceof Error ? err.message : 'Failed to save pricing rules')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  // Live calculator — uses the shared pricing engine
-  const calc = calculateEbayPrice(
-    exampleSource,
-    tiers.map(t => ({ min: t.min, max: t.max, profitPct: t.profitPct, fixProfit: t.fixProfit })),
-    eBayFeePct,
-    eBayFixedFee,
-    pricingEnabled,
-  )
+  const previewPrice = tiers.length > 0 ? (() => {
+    const sample = 50
+    const mapped = tiers.map(t => ({ min: Number(t.min) || 0, max: Number(t.max) || 0, profitPct: Number(t.profitPct) || 0, fixProfit: Number(t.fixProfit) || 0 }))
+    return calculateEbayPrice(sample, mapped, Number(pctFee) || 0, Number(fixedFee) || 0, pricingEnabled)
+  })() : null
+
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading pricing…</div>
 
   return (
-    <div className="space-y-6">
-      {/* Toggle header */}
-      <div className="card">
-        <div className="card-body">
-          <div className="flex items-start gap-3">
-            <Toggle checked={pricingEnabled} onChange={setPricingEnabled} />
-            <div>
-              <p className="text-sm font-medium text-slate-800">
-                Pricing enabled {pricingEnabled ? '' : '— off lists at the raw Amazon price, no markup/fees/rounding'}
-              </p>
-              <p className="text-xs text-slate-500 mt-0.5">
-                {pricingEnabled
-                  ? 'Every imported product is marked up using the ranges and fees below before being listed on eBay.'
-                  : 'All markup formulas are bypassed. Items list at exactly the Amazon source price.'}
-              </p>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Enable automatic pricing</p>
+          <p className="text-xs text-slate-500">When off, eBay price defaults to the Amazon price with no markup.</p>
+        </div>
+        <Toggle checked={pricingEnabled} onChange={setPricingEnabled} />
+      </div>
+
+      <div>
+        <p className="text-sm font-semibold text-slate-900 mb-2">eBay Fees</p>
+        <div className="flex flex-wrap gap-2 mb-2">
+          {Object.entries(FEE_PRESETS).map(([code, preset]) => (
+            <button key={code} className="text-xs px-2.5 py-1 rounded-full border border-slate-200 hover:bg-slate-50" onClick={() => applyPreset(code)}>
+              {preset.label} — {preset.pct}% + {formatCurrency(preset.fixed)}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-start gap-1.5 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 mb-3">
+          <Info className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700">Percentage fee is eBay's own cut of the sale — double-check you're editing the right box below, not the profit margin tiers.</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="label">Percentage fee (%)
+            <input className="input mt-1" value={pctFee} onChange={e => setPctFee(e.target.value)} />
+          </label>
+          <label className="label">Fixed fee ($)
+            <input className="input mt-1" value={fixedFee} onChange={e => setFixedFee(e.target.value)} />
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-semibold text-slate-900">Profit margin tiers</p>
+          <button className="text-xs font-medium text-brand-600 hover:text-brand-700 inline-flex items-center gap-1" onClick={addTier}>
+            <Plus className="h-3.5 w-3.5" /> Add tier
+          </button>
+        </div>
+        <div className="space-y-2">
+          {tiers.map(t => (
+            <div key={t.id} className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
+              <input className="input text-sm" placeholder="Min $" value={t.min} onChange={e => updateTier(t.id, 'min', e.target.value)} />
+              <input className="input text-sm" placeholder="Max $" value={t.max} onChange={e => updateTier(t.id, 'max', e.target.value)} />
+              <input className="input text-sm" placeholder="Profit %" value={t.profitPct} onChange={e => updateTier(t.id, 'profitPct', e.target.value)} />
+              <input className="input text-sm" placeholder="Fixed +$" value={t.fixProfit} onChange={e => updateTier(t.id, 'fixProfit', e.target.value)} />
+              <button onClick={() => removeTier(t.id)} className="text-slate-300 hover:text-error-600"><Trash2 className="h-4 w-4" /></button>
             </div>
-          </div>
+          ))}
         </div>
       </div>
 
-      {/* Range repricing matrix */}
-      <div className={cn('card transition-opacity', !pricingEnabled && 'opacity-50 pointer-events-none')}>
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Range Repricing</h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Tiered markup by Amazon source price, specific to <span className="font-medium text-slate-700">{activeStore?.ebayUsername || activeStore?.nickname || 'this store'}</span> only. Each tier's "From" auto-fills from the previous tier's "To".
-          </p>
-        </div>
-        <div className="card-body space-y-4">
-          {loading ? (
-            <div className="p-6 text-center text-sm text-slate-500">Loading pricing tiers…</div>
-          ) : (
-            <>
-              {tiers.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-slate-300 p-6 text-center">
-                  <p className="text-sm text-slate-500">No profit ranges set up yet for this store.</p>
-                  <p className="text-xs text-slate-400 mt-1">Add at least one range below — nothing is pre-filled, so pricing always stays specific to this one store.</p>
-                </div>
-              ) : (
-                <>
-                  {/* Header row (desktop) */}
-                  <div className="hidden md:grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 px-1">
-                    <label className="label">From ($)</label>
-                    <label className="label">To ($)</label>
-                    <label className="label">Profit (%)</label>
-                    <label className="label">Fix profit ($)</label>
-                    <span className="w-9" />
-                  </div>
-
-                  {tiers.map((tier, i) => {
-                    const preview = calculateEbayPrice(
-                      tier.min + (tier.max - tier.min) / 2,
-                      [{ min: tier.min, max: tier.max, profitPct: tier.profitPct, fixProfit: tier.fixProfit }],
-                      eBayFeePct,
-                      eBayFixedFee,
-                      pricingEnabled,
-                    )
-                    const previewCost = tier.min + (tier.max - tier.min) / 2
-
-                    return (
-                      <div key={tier.id} className="space-y-1">
-                        <div className="grid grid-cols-2 md:grid-cols-[1fr_1fr_1fr_1fr_auto] gap-3 items-end">
-                          <div>
-                            <label className="label md:hidden">From ($)</label>
-                            <input
-                              className="input"
-                              type="number"
-                              value={tier.min}
-                              disabled={i === 0}
-                              onChange={e => updateTier(tier.id, { min: +e.target.value })}
-                            />
-                          </div>
-                          <div>
-                            <label className="label md:hidden">To ($)</label>
-                            <input
-                              className="input"
-                              type="number"
-                              value={tier.max}
-                              onChange={e => updateTier(tier.id, { max: +e.target.value })}
-                            />
-                          </div>
-                          <div>
-                            <label className="label md:hidden">Profit (%)</label>
-                            <input
-                              className="input"
-                              type="number"
-                              step="0.01"
-                              value={tier.profitPct}
-                              onChange={e => updateTier(tier.id, { profitPct: +e.target.value })}
-                            />
-                          </div>
-                          <div>
-                            <label className="label md:hidden">Fix profit ($)</label>
-                            <input
-                              className="input"
-                              type="number"
-                              step="0.01"
-                              value={tier.fixProfit}
-                              onChange={e => updateTier(tier.id, { fixProfit: +e.target.value })}
-                            />
-                          </div>
-                          <button
-                            onClick={() => deleteTier(tier.id)}
-                            className="btn-ghost text-error-600 hover:bg-error-50 mb-0.5"
-                            title="Remove range"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                        <p className="text-xs text-slate-400 pl-1">
-                          ≈ a {formatCurrency(previewCost)} item in this range lists at {formatCurrency(preview.finalPrice)}
-                        </p>
-                      </div>
-                    )
-                  })}
-                </>
-              )}
-              <button onClick={addTier} className="btn-secondary text-sm">
-                <Plus className="w-4 h-4" /> Add range
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* eBay fees & presets */}
-      <div className={cn('card transition-opacity', !pricingEnabled && 'opacity-50 pointer-events-none')}>
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">eBay Fees</h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Applied after profit: price = (source + profit) / (1 − fee% × 0.01) + fixed fee. This is eBay's cut, not your profit margin above — double-check you're editing the right box.
-          </p>
-        </div>
-        <div className="card-body space-y-5">
-          {/* Preset cards */}
-          <div className="grid grid-cols-2 gap-3 max-w-md">
-            {FEE_PRESETS.map(preset => (
-              <button
-                key={preset.label}
-                onClick={() => applyPreset(preset)}
-                className={cn(
-                  'flex items-center gap-3 rounded-xl border p-3 text-left transition-all',
-                  activePreset === preset.label
-                    ? 'border-brand-400 bg-brand-50 ring-2 ring-brand-200'
-                    : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50',
-                )}
-              >
-                <span className="text-2xl">{preset.flag === 'US' ? '🇺🇸' : '🇹🇷'}</span>
-                <div>
-                  <p className="text-sm font-medium text-slate-800">{preset.label}</p>
-                  <p className="text-xs text-slate-500">{preset.pct}% + {formatCurrency(preset.fixed)}</p>
-                </div>
-              </button>
-            ))}
-          </div>
-
-          {/* Editable inputs */}
-          <div className="grid grid-cols-2 gap-4 max-w-md">
-            <div>
-              <label className="label">Percentage fee (%)</label>
-              <input
-                className="input"
-                type="number"
-                step="0.01"
-                value={eBayFeePct}
-                onChange={e => { setEBayFeePct(+e.target.value); setActivePreset(null) }}
-              />
-            </div>
-            <div>
-              <label className="label">Fixed fee ($)</label>
-              <input
-                className="input"
-                type="number"
-                step="0.01"
-                value={eBayFixedFee}
-                onChange={e => { setEBayFixedFee(+e.target.value); setActivePreset(null) }}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Live example calculator */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Live Example</h3>
-          <p className="text-xs text-slate-500 mt-0.5">See exactly what these settings produce before saving.</p>
-        </div>
-        <div className="card-body space-y-4">
-          <div className="max-w-xs">
-            <label className="label">Amazon source price ($)</label>
-            <input
-              className="input"
-              type="number"
-              step="0.01"
-              value={exampleSource}
-              onChange={e => setExampleSource(+e.target.value)}
-            />
-          </div>
-          <div className="rounded-xl bg-gradient-to-br from-brand-50 to-slate-50 p-4">
-            {!pricingEnabled ? (
-              <p className="text-sm text-slate-700">
-                Pricing is disabled. A <span className="font-semibold text-slate-900">{formatCurrency(exampleSource)}</span> Amazon item would list at{' '}
-                <span className="text-lg font-bold text-slate-700">{formatCurrency(exampleSource)}</span> on eBay — no markup, no fees added.
-              </p>
-            ) : tiers.length === 0 ? (
-              <p className="text-sm text-slate-700">Add at least one profit range above to see a live example.</p>
-            ) : (
-              <p className="text-sm text-slate-700">
-                A <span className="font-semibold text-slate-900">{formatCurrency(exampleSource)}</span> Amazon item would list at{' '}
-                <span className="text-lg font-bold text-brand-700">{formatCurrency(calc.finalPrice)}</span> on eBay — about{' '}
-                <span className="font-semibold text-success-600">{formatCurrency(calc.profit)}</span> profit before eBay's own cut.
-              </p>
-            )}
-            {calc.tier && (
-              <p className="mt-2 text-xs text-slate-400">
-                Matched tier: {formatCurrency(calc.tier.min)}–{formatCurrency(calc.tier.max)} at {calc.tier.profitPct}% + {formatCurrency(calc.tier.fixProfit)}
-              </p>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Toast notification */}
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
-          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
-        )}>
-          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-          <span className="text-sm font-medium">{toast.msg}</span>
+      {previewPrice && (
+        <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-sm">
+          <p className="text-slate-500 text-xs mb-1">Preview: a $50.00 Amazon item becomes</p>
+          <p className="font-semibold text-slate-900">{formatCurrency(previewPrice.finalPrice)} on eBay</p>
         </div>
       )}
 
-      {/* Action buttons */}
       <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveSettings(false)} disabled={saving || savingAll || loading}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? 'Saving…' : 'Save'}
+        <button className="btn-primary" onClick={() => void saveAll()} disabled={saving}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving ? 'Saving…' : 'Save pricing'}
         </button>
-        <button
-          className="btn-secondary"
-          onClick={() => void saveSettings(true)}
-          disabled={saving || savingAll || loading || connectedStores.length === 0}
-        >
-          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-          {savingAll ? 'Saving…' : 'Save for all stores'}
-        </button>
+        {message && <span className="flex items-center gap-1 text-sm text-success-600"><CheckCircle2 className="h-4 w-4" /> {message}</span>}
+        {error && <span className="text-sm text-error-600">{error}</span>}
       </div>
     </div>
   )
@@ -1061,222 +804,92 @@ function AvailabilitySection() {
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
-  const [defaultQuantity, setDefaultQuantity] = useState(3)
+  const [defaultQuantity, setDefaultQuantity] = useState('1')
   const [primeFilter, setPrimeFilter] = useState(false)
-  const [allowDuplicateAsins, setAllowDuplicateAsins] = useState(false)
   const [allowOutOfStock, setAllowOutOfStock] = useState(true)
-  const [autoDelist, setAutoDelist] = useState(false)
-  const [delistDays, setDelistDays] = useState(30)
+  const [allowDuplicateAsins, setAllowDuplicateAsins] = useState(true)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
-  }, [toast])
+  const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
-    async function loadSettings() {
-      const { data, error: dbErr } = await supabase
-        .from('store_availability_settings')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .maybeSingle()
+    async function load() {
+      const { data } = await supabase.from('store_availability_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
       if (cancelled) return
-      if (dbErr) { setToast({ type: 'error', msg: 'Failed to load availability settings.' }); setLoading(false); return }
       if (data) {
-        setDefaultQuantity(data.default_quantity ?? 3)
-        setPrimeFilter(data.prime_filter ?? false)
-        setAllowDuplicateAsins(data.allow_duplicate_asins ?? false)
+        setDefaultQuantity(String(data.default_quantity ?? '1'))
+        setPrimeFilter(!!data.prime_filter)
         setAllowOutOfStock(data.allow_out_of_stock ?? true)
-        setAutoDelist(data.auto_delist_enabled ?? false)
-        setDelistDays(data.days_without_sales ?? 30)
-      } else {
-        setDefaultQuantity(3)
-        setPrimeFilter(false)
-        setAllowDuplicateAsins(false)
-        setAllowOutOfStock(true)
-        setAutoDelist(false)
-        setDelistDays(30)
+        setAllowDuplicateAsins(data.allow_duplicate_asins ?? true)
       }
       setLoading(false)
     }
-
-    void loadSettings()
+    void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  async function persistAll(storeIds: string[]) {
-    const now = new Date().toISOString()
-    let updatedListingsCount = 0
-    for (const sid of storeIds) {
-      const { error: upsertErr } = await supabase.from('store_availability_settings').upsert({
-        store_id: sid,
-        default_quantity: defaultQuantity,
-        prime_filter: primeFilter,
-        allow_duplicate_asins: allowDuplicateAsins,
-        allow_out_of_stock: allowOutOfStock,
-        auto_delist_enabled: autoDelist,
-        days_without_sales: delistDays,
-        updated_at: now,
-      }, { onConflict: 'store_id' })
-      if (upsertErr) throw new Error(upsertErr.message)
-
-      // Apply this quantity to every existing listing for this store right now, done
-      // server-side so it scales correctly whether there are 3 listings or 30,000 — a single
-      // database query for our own records, and eBay's real bulk endpoint (25 SKUs per call)
-      // instead of one HTTP request per listing.
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/bulk-set-quantity`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-        body: JSON.stringify({ storeId: sid, route: 'bulk-set-quantity', quantity: defaultQuantity }),
-      })
-      const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string; localUpdated?: number }
-      if (!res.ok || !data.success) throw new Error(data.error || 'Failed to apply quantity to existing listings')
-      updatedListingsCount += data.localUpdated || 0
-    }
-    return updatedListingsCount
-  }
-
-  async function saveSettings(forAllStores = false) {
+  async function save() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
-    setToast(null)
+    setSaving(true)
+    setMessage(null)
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      const updatedCount = await persistAll(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `Availability settings saved for all ${storeIds.length} connected stores. ${updatedCount} existing listing${updatedCount === 1 ? '' : 's'} updated to quantity ${defaultQuantity}.`
-          : `Availability settings saved. ${updatedCount} existing listing${updatedCount === 1 ? '' : 's'} updated to quantity ${defaultQuantity}.`,
-      })
+      const { error } = await supabase.from('store_availability_settings').upsert({
+        store_id: activeStore.id,
+        default_quantity: Number(defaultQuantity) || 1,
+        prime_filter: primeFilter,
+        allow_out_of_stock: allowOutOfStock,
+        allow_duplicate_asins: allowDuplicateAsins,
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage('Availability settings saved.')
     } catch (err) {
-      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save availability settings.' })
+      setMessage(err instanceof Error ? err.message : 'Failed to save')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  if (loading) {
-    return <div className="p-6 text-center text-sm text-slate-500">Loading availability settings…</div>
-  }
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-6">
-      {/* Availability rules */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Availability Rules</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Defaults applied when new items are listed on eBay.</p>
+    <div className="space-y-5">
+      <label className="label">Default quantity for new listings
+        <input className="input mt-1 max-w-xs" value={defaultQuantity} onChange={e => setDefaultQuantity(e.target.value)} />
+      </label>
+
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Prime filter</p>
+          <p className="text-xs text-slate-500">Only list products that are Prime/Fulfilled-by-Amazon.</p>
         </div>
-        <div className="card-body space-y-4">
-          <div className="max-w-xs">
-            <label className="label">Quantity in stock (default per listing)</label>
-            <input
-              className="input"
-              type="number"
-              min={0}
-              value={defaultQuantity}
-              onChange={e => setDefaultQuantity(+e.target.value)}
-            />
-            <p className="text-xs text-slate-400 mt-1">Applies to new listings AND updates every existing listing's quantity (here and live on eBay) as soon as you save.</p>
-          </div>
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={primeFilter} onChange={setPrimeFilter} />
-            <div className="flex-1">
-              <div className="flex items-center gap-1.5">
-                <p className="text-sm font-medium text-slate-700">Prime Filter</p>
-                <span className="group relative">
-                  <HelpCircle className="h-3.5 w-3.5 text-slate-400 cursor-help" />
-                  <span className="pointer-events-none absolute left-1/2 top-6 z-10 -translate-x-1/2 w-48 rounded-lg bg-slate-800 px-3 py-2 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100">
-                    Only Amazon Prime / FBA items are allowed. Non-Prime or status drops automatically end the listing.
-                  </span>
-                </span>
-              </div>
-              <p className="text-xs text-slate-500 mt-0.5">Only allow Amazon Prime / FBA items; non-Prime items are skipped or ended.</p>
-            </div>
-          </div>
-        </div>
+        <Toggle checked={primeFilter} onChange={setPrimeFilter} />
       </div>
 
-      {/* Cross-store & stock behavior */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Cross-store & Stock Behavior</h3>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Allow out-of-stock listings</p>
+          <p className="text-xs text-slate-500">When off, an out-of-stock product is skipped entirely instead of being added at 0 quantity.</p>
         </div>
-        <div className="card-body space-y-4">
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={allowDuplicateAsins} onChange={setAllowDuplicateAsins} />
-            <div>
-              <p className="text-sm font-medium text-slate-700">Allow duplicate ASINs across stores</p>
-              <p className="text-xs text-slate-500 mt-0.5">Prevents or allows listing the same ASIN in multiple linked stores.</p>
-            </div>
-          </div>
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={allowOutOfStock} onChange={setAllowOutOfStock} />
-            <div>
-              <p className="text-sm font-medium text-slate-700">Allow out-of-stock listings</p>
-              <p className="text-xs text-slate-500 mt-0.5">When Amazon stock drops to 0, sets eBay stock to 0 instead of immediately deleting the listing.</p>
-            </div>
-          </div>
-        </div>
+        <Toggle checked={allowOutOfStock} onChange={setAllowOutOfStock} />
       </div>
 
-      {/* Auto-delist cold products */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Auto-delist Cold Products</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Ends a listing automatically once it's gone this many days with zero sales (counted from the listing date if it's never sold).</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Allow duplicate ASINs</p>
+          <p className="text-xs text-slate-500">When off, the same ASIN can't be added twice to this store.</p>
         </div>
-        <div className="card-body space-y-4">
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={autoDelist} onChange={setAutoDelist} />
-            <div className="flex-1">
-              <p className="text-sm font-medium text-slate-700">Enable</p>
-              {autoDelist && (
-                <div className="mt-3 max-w-xs">
-                  <label className="label">Days with no sale before auto-delist</label>
-                  <input className="input" type="number" min={1} value={delistDays} onChange={e => setDelistDays(+e.target.value)} />
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <Toggle checked={allowDuplicateAsins} onChange={setAllowDuplicateAsins} />
       </div>
 
-      {/* Toast */}
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
-          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
-        )}>
-          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-          <span className="text-sm font-medium">{toast.msg}</span>
-        </div>
-      )}
-
-      {/* Action buttons */}
       <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveSettings(false)} disabled={saving || savingAll || loading}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+        <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save'}
         </button>
-        <button
-          className="btn-secondary"
-          onClick={() => void saveSettings(true)}
-          disabled={saving || savingAll || loading || connectedStores.length === 0}
-        >
-          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-          {savingAll ? 'Saving…' : 'Save for all stores'}
-        </button>
+        {message && <span className="text-sm text-success-600">{message}</span>}
       </div>
     </div>
   )
@@ -1287,152 +900,68 @@ function PromotedSection() {
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
-  const [autoPromote, setAutoPromote] = useState(true)
-  const [adRate, setAdRate] = useState(2.5)
+  const [autoPromote, setAutoPromote] = useState(false)
+  const [adRate, setAdRate] = useState('3')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
-  }, [toast])
+  const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
-    async function loadSettings() {
-      const { data, error: dbErr } = await supabase
-        .from('store_promoted_settings')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .maybeSingle()
+    async function load() {
+      const { data } = await supabase.from('store_promoted_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
       if (cancelled) return
-      if (dbErr) { setToast({ type: 'error', msg: 'Failed to load promoted settings.' }); setLoading(false); return }
       if (data) {
-        setAutoPromote(data.auto_promote_enabled ?? true)
-        setAdRate(Number(data.default_ad_rate) || 2.5)
-      } else {
-        setAutoPromote(true)
-        setAdRate(2.5)
+        setAutoPromote(data.auto_promote_enabled ?? false)
+        setAdRate(String(data.default_ad_rate ?? '3'))
       }
       setLoading(false)
     }
-
-    void loadSettings()
+    void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  function clampAdRate(value: number) {
-    if (Number.isNaN(value)) return 1
-    return Math.min(100, Math.max(1, value))
-  }
-
-  async function persistAll(storeIds: string[]) {
-    const now = new Date().toISOString()
-    for (const sid of storeIds) {
-      const { error: upsertErr } = await supabase.from('store_promoted_settings').upsert({
-        store_id: sid,
-        auto_promote_enabled: autoPromote,
-        default_ad_rate: clampAdRate(adRate),
-        updated_at: now,
-      }, { onConflict: 'store_id' })
-      if (upsertErr) throw new Error(upsertErr.message)
-    }
-  }
-
-  async function saveSettings(forAllStores = false) {
+  async function save() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
-    setToast(null)
+    setSaving(true)
+    setMessage(null)
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistAll(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `Promoted settings saved for all ${storeIds.length} connected stores.`
-          : 'Promoted settings saved.',
-      })
+      const { error } = await supabase.from('store_promoted_settings').upsert({
+        store_id: activeStore.id,
+        auto_promote_enabled: autoPromote,
+        default_ad_rate: Number(adRate) || 3,
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage('Promoted Listings settings saved.')
     } catch (err) {
-      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save promoted settings.' })
+      setMessage(err instanceof Error ? err.message : 'Failed to save')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  if (loading) {
-    return <div className="p-6 text-center text-sm text-slate-500">Loading promoted settings…</div>
-  }
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-6">
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Promoted Listings</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Automatically adds every new listing to eBay Promoted Listings at your default ad rate — no manual work per listing.</p>
+    <div className="space-y-5">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium text-slate-900">Auto-promote new listings</p>
+          <p className="text-xs text-slate-500">Every new listing is automatically added to your eBay ad campaign.</p>
         </div>
-        <div className="card-body space-y-4">
-          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <AlertCircle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
-            <p className="text-xs text-amber-700 leading-relaxed">
-              Whether a listing actually gets a running ad is entirely up to eBay's own Promoted Listings eligibility bar (an established sales history, among other factors it sets, not us). This toggle can't override that — if your store isn't there yet, turning it on has no effect.
-            </p>
-          </div>
-
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={autoPromote} onChange={setAutoPromote} />
-            <div>
-              <p className="text-sm font-medium text-slate-700">Auto-promote new listings</p>
-              <p className="text-xs text-slate-500 mt-0.5">Adds every newly published listing to a Promoted Listings Standard campaign at the default ad rate.</p>
-            </div>
-          </div>
-
-          {autoPromote && (
-            <div className="max-w-xs">
-              <label className="label">Default ad rate (%)</label>
-              <input
-                className="input"
-                type="number"
-                min={1}
-                max={100}
-                step="0.1"
-                value={adRate}
-                onChange={e => setAdRate(clampAdRate(+e.target.value))}
-              />
-              <p className="text-xs text-slate-400 mt-1">Must be between 1% and 100%.</p>
-            </div>
-          )}
-        </div>
+        <Toggle checked={autoPromote} onChange={setAutoPromote} />
       </div>
-
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
-          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
-        )}>
-          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-          <span className="text-sm font-medium">{toast.msg}</span>
-        </div>
-      )}
-
+      <label className="label">Default ad rate (%)
+        <input className="input mt-1 max-w-xs" value={adRate} onChange={e => setAdRate(e.target.value)} />
+      </label>
       <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveSettings(false)} disabled={saving || savingAll || loading}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+        <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save'}
         </button>
-        <button
-          className="btn-secondary"
-          onClick={() => void saveSettings(true)}
-          disabled={saving || savingAll || loading || connectedStores.length === 0}
-        >
-          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-          {savingAll ? 'Saving…' : 'Save for all stores'}
-        </button>
+        {message && <span className="text-sm text-success-600">{message}</span>}
       </div>
     </div>
   )
@@ -1443,356 +972,95 @@ function VeroSection() {
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
-  const [removeKeywords, setRemoveKeywords] = useState<string[]>([])
-  const [blockKeywords, setBlockKeywords] = useState<string[]>([])
-  const [blockAsins, setBlockAsins] = useState<string[]>([])
-  const [blockInBrand, setBlockInBrand] = useState(true)
-  const [blockInTitle, setBlockInTitle] = useState(true)
-  const [blockInDesc, setBlockInDesc] = useState(true)
-  const [autoRemoveBrand, setAutoRemoveBrand] = useState(false)
-  const [autoReplaceBrand, setAutoReplaceBrand] = useState(false)
-
-  const [removeInput, setRemoveInput] = useState('')
-  const [blockInput, setBlockInput] = useState('')
-  const [asinInput, setAsinInput] = useState('')
-  const [removeSearch, setRemoveSearch] = useState('')
-  const [blockSearch, setBlockSearch] = useState('')
-  const [asinSearch, setAsinSearch] = useState('')
-
+  const [keywords, setKeywords] = useState<string[]>([])
+  const [newKeyword, setNewKeyword] = useState('')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
-  }, [toast])
+  const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
-    async function loadSettings() {
-      const { data, error: dbErr } = await supabase
-        .from('store_vero_settings')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .maybeSingle()
+    async function load() {
+      const { data } = await supabase.from('store_vero_settings').select('block_keywords').eq('store_id', activeStore!.id).maybeSingle()
       if (cancelled) return
-      if (dbErr) { setToast({ type: 'error', msg: 'Failed to load VeRO settings.' }); setLoading(false); return }
-      if (data) {
-        setRemoveKeywords(data.remove_keywords || [])
-        setBlockKeywords(data.block_keywords || [])
-        setBlockAsins(data.block_asins || [])
-        setBlockInBrand(data.block_in_brand ?? true)
-        setBlockInTitle(data.block_in_title ?? true)
-        setBlockInDesc(data.block_in_description ?? true)
-        setAutoRemoveBrand(data.auto_remove_brand ?? false)
-        setAutoReplaceBrand(data.auto_replace_brand ?? false)
-      } else {
-        setRemoveKeywords([]); setBlockKeywords([]); setBlockAsins([])
-        setBlockInBrand(true); setBlockInTitle(true); setBlockInDesc(true)
-        setAutoRemoveBrand(false); setAutoReplaceBrand(false)
-      }
+      setKeywords((data?.block_keywords as string[]) || [])
       setLoading(false)
     }
-    void loadSettings()
+    void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  function parseInput(raw: string): string[] {
-    return raw
-      .split(/[\n,]+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 0)
-      .map(s => s.toLowerCase())
+  function addKeyword() {
+    const trimmed = newKeyword.trim()
+    if (!trimmed || keywords.includes(trimmed)) return
+    setKeywords(prev => [...prev, trimmed])
+    setNewKeyword('')
+  }
+  function removeKeyword(kw: string) {
+    setKeywords(prev => prev.filter(k => k !== kw))
   }
 
-  function addRemove() {
-    const words = parseInput(removeInput)
-    if (!words.length) return
-    setRemoveKeywords(prev => Array.from(new Set([...prev, ...words])))
-    setRemoveInput('')
-  }
-  function addBlock() {
-    const words = parseInput(blockInput)
-    if (!words.length) return
-    setBlockKeywords(prev => Array.from(new Set([...prev, ...words])))
-    setBlockInput('')
-  }
-  function addAsin() {
-    const words = parseInput(asinInput)
-    if (!words.length) return
-    setBlockAsins(prev => Array.from(new Set([...prev, ...words])))
-    setAsinInput('')
-  }
-
-  function copyToClipboard(text: string) {
-    void navigator.clipboard.writeText(text)
-    setToast({ type: 'success', msg: 'Copied to clipboard.' })
-  }
-
-  async function persistAll(storeIds: string[]) {
-    const now = new Date().toISOString()
-    for (const sid of storeIds) {
-      const { error: upsertErr } = await supabase.from('store_vero_settings').upsert({
-        store_id: sid,
-        remove_keywords: removeKeywords,
-        block_keywords: blockKeywords,
-        block_in_brand: blockInBrand,
-        block_in_title: blockInTitle,
-        block_in_description: blockInDesc,
-        block_asins: blockAsins,
-        auto_remove_brand: autoRemoveBrand,
-        auto_replace_brand: autoReplaceBrand,
-        updated_at: now,
-      }, { onConflict: 'store_id' })
-      if (upsertErr) throw new Error(upsertErr.message)
-    }
-  }
-
-  async function saveSettings(forAllStores = false) {
+  async function save() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
-    setToast(null)
+    setSaving(true)
+    setMessage(null)
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistAll(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `VeRO settings saved for all ${storeIds.length} connected stores.`
-          : 'VeRO settings saved.',
-      })
+      const { error } = await supabase.from('store_vero_settings').upsert({
+        store_id: activeStore.id,
+        block_keywords: keywords,
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage('VeRO keyword list saved.')
     } catch (err) {
-      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save VeRO settings.' })
+      setMessage(err instanceof Error ? err.message : 'Failed to save')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  if (loading) {
-    return <div className="p-6 text-center text-sm text-slate-500">Loading VeRO settings…</div>
-  }
-
-  const filteredRemove = removeKeywords.filter(w => w.includes(removeSearch.toLowerCase()))
-  const filteredBlock = blockKeywords.filter(w => w.includes(blockSearch.toLowerCase()))
-  const filteredAsins = blockAsins.filter(a => a.includes(asinSearch.toLowerCase()))
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-6">
-      {/* 1. Remove Keywords */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Remove Keywords</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Remove specific keywords from item title &amp; description — doesn't block listing, just strips them.</p>
-        </div>
-        <div className="card-body space-y-4">
-          <div className="flex gap-2">
-            <input
-              className="input flex-1"
-              placeholder="Add word (comma or newline separated for bulk)…"
-              value={removeInput}
-              onChange={e => setRemoveInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') addRemove() }}
-            />
-            <button className="btn-primary shrink-0" onClick={addRemove}><Plus className="w-4 h-4" /> Add</button>
-          </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              className="input pl-9 w-full"
-              placeholder="Search word…"
-              value={removeSearch}
-              onChange={e => setRemoveSearch(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-wrap gap-2 min-h-[2.5rem] p-3 bg-slate-50 rounded-lg border border-slate-200">
-            {filteredRemove.length === 0 ? (
-              <span className="text-xs text-slate-400 self-center">No keywords yet.</span>
-            ) : filteredRemove.map(word => (
-              <span key={word} className="inline-flex items-center gap-1.5 rounded-full bg-white border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm">
-                {word}
-                <button onClick={() => setRemoveKeywords(prev => prev.filter(w => w !== word))} className="text-slate-400 hover:text-error-600">
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <button className="btn-ghost text-xs" onClick={() => copyToClipboard(removeKeywords.join('\n'))} disabled={removeKeywords.length === 0}>
-                <Copy className="w-3.5 h-3.5" /> Copy to clipboard
-              </button>
-              <button className="btn-ghost text-xs" onClick={() => setRemoveKeywords([])} disabled={removeKeywords.length === 0}>
-                <Trash2 className="w-3.5 h-3.5" /> Clear
-              </button>
-            </div>
-            <span className="text-xs text-slate-500">Total: {removeKeywords.length} words</span>
-          </div>
-          <div className="space-y-2 pt-2 border-t border-slate-100">
-            <label className="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" checked={autoRemoveBrand} onChange={e => setAutoRemoveBrand(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span className="text-sm text-slate-700">Auto-remove source's brand name from title &amp; description</span>
-            </label>
-            <label className="flex items-center gap-3 cursor-pointer">
-              <input type="checkbox" checked={autoReplaceBrand} onChange={e => setAutoReplaceBrand(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span className="text-sm text-slate-700">Auto-replace brand with 'Does not apply'</span>
-            </label>
-          </div>
-        </div>
+    <div className="space-y-4">
+      <p className="text-xs text-slate-500">Products whose title, description, or specifics contain any of these words are blocked from listing. Amazon/AmazonBasics/Prime/Fulfilled-by-Amazon are always blocked, even if not listed here.</p>
+      <div className="flex flex-wrap gap-2">
+        {keywords.map(kw => (
+          <span key={kw} className="inline-flex items-center gap-1.5 rounded-full bg-red-50 border border-red-200 px-3 py-1 text-xs text-red-700">
+            {kw}
+            <button onClick={() => removeKeyword(kw)}><X className="h-3 w-3" /></button>
+          </span>
+        ))}
+        {keywords.length === 0 && <p className="text-xs text-slate-400">No custom blocked words yet.</p>}
       </div>
-
-      {/* 2. Block by Keyword */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Block by Keyword (VeRO / Copyright Protection)</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Blocks items with these keywords during bulk listing / shows a warning in the auto-lister.</p>
-        </div>
-        <div className="card-body space-y-4">
-          <div className="flex flex-wrap gap-4">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={blockInBrand} onChange={e => setBlockInBrand(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span className="text-sm text-slate-700">When in brand</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={blockInTitle} onChange={e => setBlockInTitle(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span className="text-sm text-slate-700">When in title</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input type="checkbox" checked={blockInDesc} onChange={e => setBlockInDesc(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
-              <span className="text-sm text-slate-700">When in description</span>
-            </label>
-          </div>
-          <div className="flex gap-2">
-            <input
-              className="input flex-1"
-              placeholder="Add word (comma or newline separated for bulk)…"
-              value={blockInput}
-              onChange={e => setBlockInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') addBlock() }}
-            />
-            <button className="btn-primary shrink-0" onClick={addBlock}><Plus className="w-4 h-4" /> Add</button>
-          </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              className="input pl-9 w-full"
-              placeholder="Search word…"
-              value={blockSearch}
-              onChange={e => setBlockSearch(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-wrap gap-2 min-h-[3rem] max-h-64 overflow-y-auto p-3 bg-slate-50 rounded-lg border border-slate-200">
-            {filteredBlock.length === 0 ? (
-              <span className="text-xs text-slate-400 self-center">No blocked keywords yet.</span>
-            ) : filteredBlock.map(word => (
-              <span key={word} className="inline-flex items-center gap-1.5 rounded-full bg-white border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-sm">
-                {word}
-                <button onClick={() => setBlockKeywords(prev => prev.filter(w => w !== word))} className="text-slate-400 hover:text-error-600">
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <button className="btn-ghost text-xs" onClick={() => copyToClipboard(blockKeywords.join('\n'))} disabled={blockKeywords.length === 0}>
-                <Copy className="w-3.5 h-3.5" /> Copy to clipboard
-              </button>
-              <button className="btn-ghost text-xs" onClick={() => setBlockKeywords([])} disabled={blockKeywords.length === 0}>
-                <Trash2 className="w-3.5 h-3.5" /> Clear
-              </button>
-            </div>
-            <span className="text-xs text-slate-500">Total: {blockKeywords.length} words</span>
-          </div>
-        </div>
+      <div className="flex gap-2">
+        <input
+          className="input flex-1"
+          value={newKeyword}
+          onChange={e => setNewKeyword(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addKeyword() }}
+          placeholder="Add a word or brand to block"
+        />
+        <button className="btn-secondary shrink-0" onClick={addKeyword}><Plus className="h-4 w-4" /> Add</button>
       </div>
-
-      {/* 3. Block by ASIN */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Block by ASIN</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Blocks these specific Amazon products outright, regardless of title/description matches.</p>
-        </div>
-        <div className="card-body space-y-4">
-          <div className="flex gap-2">
-            <input
-              className="input flex-1"
-              placeholder="Add ASIN (comma or newline separated for bulk)…"
-              value={asinInput}
-              onChange={e => setAsinInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') addAsin() }}
-            />
-            <button className="btn-primary shrink-0" onClick={addAsin}><Plus className="w-4 h-4" /> Add</button>
-          </div>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-            <input
-              className="input pl-9 w-full"
-              placeholder="Search ASIN…"
-              value={asinSearch}
-              onChange={e => setAsinSearch(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-wrap gap-2 min-h-[2.5rem] max-h-64 overflow-y-auto p-3 bg-slate-50 rounded-lg border border-slate-200">
-            {filteredAsins.length === 0 ? (
-              <span className="text-xs text-slate-400 self-center">No blocked ASINs yet.</span>
-            ) : filteredAsins.map(asin => (
-              <span key={asin} className="inline-flex items-center gap-1.5 rounded-full bg-white border border-slate-200 px-2.5 py-1 text-xs font-mono font-medium text-slate-700 shadow-sm">
-                {asin}
-                <button onClick={() => setBlockAsins(prev => prev.filter(a => a !== asin))} className="text-slate-400 hover:text-error-600">
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <button className="btn-ghost text-xs" onClick={() => copyToClipboard(blockAsins.join('\n'))} disabled={blockAsins.length === 0}>
-                <Copy className="w-3.5 h-3.5" /> Copy to clipboard
-              </button>
-              <button className="btn-ghost text-xs" onClick={() => setBlockAsins([])} disabled={blockAsins.length === 0}>
-                <Trash2 className="w-3.5 h-3.5" /> Clear
-              </button>
-            </div>
-            <span className="text-xs text-slate-500">Total: {blockAsins.length} ASINs</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Toast */}
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
-          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
-        )}>
-          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-          <span className="text-sm font-medium">{toast.msg}</span>
-        </div>
-      )}
-
-      {/* Action buttons */}
       <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveSettings(false)} disabled={saving || savingAll || loading}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? 'Saving…' : 'Save'}
+        <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving ? 'Saving…' : 'Save list'}
         </button>
-        <button
-          className="btn-secondary"
-          onClick={() => void saveSettings(true)}
-          disabled={saving || savingAll || loading || connectedStores.length === 0}
-        >
-          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-          {savingAll ? 'Saving…' : 'Save for all stores'}
-        </button>
+        {message && <span className="text-sm text-success-600">{message}</span>}
       </div>
     </div>
   )
 }
+
+// ---- Listing Templates: multiple named templates per store, one marked active ----
+// "Active" is what every new listing (Single tab fetch, Bulk run) actually uses to build its
+// description — enforced by useData.ts / ListItems.tsx filtering on is_active=true when they
+// load the template. Saving a template here never touches which one is active; that's a
+// separate, explicit action so switching designs is never accidental.
+type TemplateRow = { id: string; name: string; template: string; is_active: boolean }
 
 function ListingTemplateSection() {
   const { stores } = useStoreData()
@@ -1800,147 +1068,309 @@ function ListingTemplateSection() {
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
   const activeStoreName = activeStore?.ebayUsername || activeStore?.nickname || 'Our Store'
 
-  const [template, setTemplate] = useState(DEFAULT_LISTING_TEMPLATE)
+  const [templates, setTemplates] = useState<TemplateRow[]>([])
+  const [selectedId, setSelectedId] = useState<string | 'new'>('new')
+  const [draftName, setDraftName] = useState('Template 1')
+  const [draftTemplate, setDraftTemplate] = useState(DEFAULT_LISTING_TEMPLATE)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
+  const [settingActiveId, setSettingActiveId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   const variables = [
-    { name: '{{title}}', desc: 'Listing title' },
-    { name: '{{store_name}}', desc: 'Your eBay store name' },
-    { name: '{{#main_image}}...{{/main_image}}', desc: 'Main product image (use {{.}} inside for the URL)' },
-    { name: '{{#product_description}}...{{/product_description}}', desc: 'Product description block (use {{.}} inside)' },
-    { name: '{{#feature_bullets}}...{{/feature_bullets}}', desc: 'Loops once per bullet point (use {{.}} inside for each one)' },
+    { name: '{{title}}', desc: 'Product title' },
+    { name: '{{store_name}}', desc: 'Your store name' },
+    { name: '{{#main_image}}...{{/main_image}}', desc: 'Main product photo' },
+    { name: '{{#gallery}}...{{/gallery}}', desc: 'Extra product photos (loop)' },
+    { name: '{{#product_description}}...{{/product_description}}', desc: 'Description text' },
+    { name: '{{#feature_bullets}}...{{/feature_bullets}}', desc: 'Feature bullet list (loop)' },
   ]
 
   useEffect(() => {
     if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
+    const t = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(t)
   }, [toast])
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
     async function load() {
-      const { data, error: dbErr } = await supabase
+      const { data, error } = await supabase
         .from('listing_templates')
-        .select('template')
+        .select('id, name, template, is_active')
         .eq('store_id', activeStore!.id)
-        .maybeSingle()
+        .order('created_at', { ascending: true })
       if (cancelled) return
-      if (dbErr) {
-        setToast({ type: 'error', msg: 'Failed to load your saved template.' })
-      } else if (data?.template) {
-        setTemplate(data.template)
+      if (error) {
+        setToast({ type: 'error', msg: 'Failed to load your templates.' })
+        setLoading(false)
+        return
+      }
+      const rows = (data || []) as TemplateRow[]
+      setTemplates(rows)
+      if (rows.length > 0) {
+        const active = rows.find(r => r.is_active) || rows[0]
+        setSelectedId(active.id)
+        setDraftName(active.name)
+        setDraftTemplate(active.template)
       } else {
-        setTemplate(DEFAULT_LISTING_TEMPLATE)
+        setSelectedId('new')
+        setDraftName('Template 1')
+        setDraftTemplate(DEFAULT_LISTING_TEMPLATE)
       }
       setLoading(false)
     }
-
     void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
+  function selectTemplate(row: TemplateRow) {
+    setSelectedId(row.id)
+    setDraftName(row.name)
+    setDraftTemplate(row.template)
+  }
+
+  function startNewTemplate() {
+    setSelectedId('new')
+    setDraftName(`Template ${templates.length + 1}`)
+    setDraftTemplate(DEFAULT_LISTING_TEMPLATE)
+  }
+
   function insertVariable(token: string) {
-    setTemplate(prev => prev + '\n' + token)
+    setDraftTemplate(prev => `${prev}\n${token}`)
   }
 
-  async function persistAll(storeIds: string[]) {
-    const now = new Date().toISOString()
-    for (const sid of storeIds) {
-      const { error } = await supabase.from('listing_templates').upsert({
-        store_id: sid,
-        template,
-        updated_at: now,
-      }, { onConflict: 'store_id' })
-      if (error) throw new Error(error.message)
-    }
-  }
-
-  async function saveTemplate(forAllStores = false) {
+  async function saveTemplate() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
+    setSaving(true)
     setToast(null)
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistAll(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `Template saved for all ${storeIds.length} connected stores.`
-          : 'Template saved.',
-      })
+      if (selectedId === 'new') {
+        // The very first template for a store becomes active automatically — every store
+        // needs exactly one active template to actually list anything, so a brand-new store
+        // shouldn't be left with zero.
+        const makeActive = templates.length === 0
+        const { data, error } = await supabase
+          .from('listing_templates')
+          .insert({
+            store_id: activeStore.id,
+            name: draftName.trim() || `Template ${templates.length + 1}`,
+            template: draftTemplate,
+            is_active: makeActive,
+          })
+          .select('id, name, template, is_active')
+          .single()
+        if (error) throw new Error(error.message)
+        const row = data as TemplateRow
+        setTemplates(prev => [...prev, row])
+        setSelectedId(row.id)
+      } else {
+        const { error } = await supabase
+          .from('listing_templates')
+          .update({
+            name: draftName.trim() || 'Untitled',
+            template: draftTemplate,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', selectedId)
+        if (error) throw new Error(error.message)
+        setTemplates(prev => prev.map(t => t.id === selectedId ? { ...t, name: draftName.trim() || 'Untitled', template: draftTemplate } : t))
+      }
+      setToast({ type: 'success', msg: 'Template saved.' })
     } catch (err) {
       setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save template.' })
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  // Live preview — same rendering engine used when a real listing is built, fed with
-  // realistic sample data (and this store's real name) so what you see here is exactly
-  // what buyers will see, not a disconnected mockup.
-  const previewHtml = fitDescriptionToBudget(template, {
+  async function setActive(id: string) {
+    if (!activeStore?.id) return
+    setSettingActiveId(id)
+    setToast(null)
+    try {
+      const { error: offErr } = await supabase.from('listing_templates').update({ is_active: false }).eq('store_id', activeStore.id)
+      if (offErr) throw new Error(offErr.message)
+      const { error: onErr } = await supabase.from('listing_templates').update({ is_active: true }).eq('id', id)
+      if (onErr) throw new Error(onErr.message)
+      setTemplates(prev => prev.map(t => ({ ...t, is_active: t.id === id })))
+      setToast({ type: 'success', msg: 'Active template updated — every new listing from now on uses it.' })
+    } catch (err) {
+      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to set active template.' })
+    } finally {
+      setSettingActiveId(null)
+    }
+  }
+
+  async function deleteTemplate(id: string) {
+    if (!window.confirm('Delete this template? This cannot be undone.')) return
+    setDeletingId(id)
+    setToast(null)
+    try {
+      const { error } = await supabase.from('listing_templates').delete().eq('id', id)
+      if (error) throw new Error(error.message)
+      const remaining = templates.filter(t => t.id !== id)
+      setTemplates(remaining)
+      if (selectedId === id) {
+        if (remaining.length > 0) {
+          selectTemplate(remaining.find(t => t.is_active) || remaining[0])
+        } else {
+          startNewTemplate()
+        }
+      }
+      setToast({ type: 'success', msg: 'Template deleted.' })
+    } catch (err) {
+      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to delete template.' })
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  const isNew = selectedId === 'new'
+  const currentIsActive = !isNew && !!templates.find(t => t.id === selectedId)?.is_active
+
+  const previewHtml = fitDescriptionToBudget(draftTemplate, {
     title: 'Wireless Bluetooth Earbuds Pro Max',
     store_name: activeStoreName,
-    main_image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=400',
+    main_image: 'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=500',
+    gallery: [
+      'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=200',
+      'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=200',
+      'https://images.unsplash.com/photo-1590658268037-6bf12165a8df?w=200',
+    ],
     product_description: 'Experience premium sound with these Wireless Bluetooth Earbuds Pro Max, featuring industry-leading noise cancellation and a comfortable, secure fit for all-day wear.',
     feature_bullets: ['Active Noise Cancelling', '30-Hour Playtime', 'Wireless Charging Case', 'IPX5 Water Resistant'],
   })
 
   if (connectedStores.length === 0) {
-    return <div className="card p-8 text-center text-sm text-slate-500">Connect an eBay store first to set up a listing template.</div>
+    return <div className="card p-8 text-center text-sm text-slate-500">Connect an eBay store first to set up listing templates.</div>
   }
 
   return (
     <div className="space-y-6">
       <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Listing Template</h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Editing for <span className="font-medium text-slate-700">{activeStoreName}</span>. This exact template is used automatically every time a product is listed from Single Add or Bulk Add. Variables you can use:
-          </p>
+        <div className="card-header flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h3 className="font-semibold text-slate-900">Listing Templates</h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              For <span className="font-medium text-slate-700">{activeStoreName}</span>. Keep as many designs as you like — the one marked <span className="font-medium text-slate-700">Active</span> is what every new listing uses.
+            </p>
+          </div>
+          <button onClick={startNewTemplate} className="btn-secondary text-sm">
+            <Plus className="w-4 h-4" /> New template
+          </button>
         </div>
-        <div className="card-body space-y-4">
+        <div className="card-body">
           {loading ? (
-            <div className="p-6 text-center text-sm text-slate-500">Loading your template…</div>
+            <div className="p-6 text-center text-sm text-slate-500">Loading your templates…</div>
           ) : (
-            <>
-              <div className="flex flex-wrap gap-2">
-                {variables.map(v => (
-                  <button
-                    key={v.name}
-                    onClick={() => insertVariable(v.name)}
-                    className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition"
-                    title={v.desc}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
+              <div className="md:col-span-1 space-y-2">
+                {templates.map(t => (
+                  <div
+                    key={t.id}
+                    className={cn(
+                      'rounded-lg border p-3 cursor-pointer transition-colors',
+                      selectedId === t.id ? 'border-brand-400 bg-brand-50' : 'border-slate-200 hover:border-slate-300',
+                    )}
+                    onClick={() => selectTemplate(t)}
                   >
-                    {v.name}
-                  </button>
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-medium text-slate-800 truncate">{t.name}</p>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void deleteTemplate(t.id) }}
+                        className="text-slate-300 hover:text-error-600 shrink-0"
+                        title="Delete this template"
+                      >
+                        {deletingId === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                    {t.is_active ? (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-success-700 bg-success-50 px-1.5 py-0.5 rounded-full mt-1.5">
+                        <CheckCircle2 className="w-3 h-3" /> Active
+                      </span>
+                    ) : (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); void setActive(t.id) }}
+                        disabled={settingActiveId === t.id}
+                        className="text-[11px] text-brand-600 hover:text-brand-700 font-medium mt-1.5"
+                      >
+                        {settingActiveId === t.id ? 'Setting…' : 'Set as active'}
+                      </button>
+                    )}
+                  </div>
                 ))}
+                {isNew && (
+                  <div className="rounded-lg border border-brand-400 bg-brand-50 p-3">
+                    <p className="text-sm font-medium text-slate-800">New template</p>
+                    <p className="text-[11px] text-slate-500 mt-1">Not saved yet</p>
+                  </div>
+                )}
+                {templates.length === 0 && !isNew && (
+                  <p className="text-xs text-slate-400">No templates yet.</p>
+                )}
               </div>
-              <textarea
-                className="input min-h-[300px] resize-y font-mono text-xs"
-                value={template}
-                onChange={e => setTemplate(e.target.value)}
-              />
-              <button className="btn-ghost text-xs text-slate-500" onClick={() => setTemplate(DEFAULT_LISTING_TEMPLATE)}>
-                Reset to default design
-              </button>
-            </>
+
+              <div className="md:col-span-3 space-y-4">
+                <div className="flex items-center gap-3">
+                  <input
+                    className="input flex-1"
+                    value={draftName}
+                    onChange={e => setDraftName(e.target.value)}
+                    placeholder="Template name"
+                  />
+                  {!isNew && !currentIsActive && (
+                    <button onClick={() => void setActive(selectedId as string)} className="btn-secondary text-sm shrink-0">
+                      Set as active
+                    </button>
+                  )}
+                  {currentIsActive && (
+                    <span className="inline-flex items-center gap-1 text-xs text-success-700 bg-success-50 px-2.5 py-1.5 rounded-lg shrink-0">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Active
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  {variables.map(v => (
+                    <button
+                      key={v.name}
+                      onClick={() => insertVariable(v.name)}
+                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition"
+                      title={v.desc}
+                    >
+                      {v.name}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  className="input min-h-[260px] resize-y font-mono text-xs"
+                  value={draftTemplate}
+                  onChange={e => setDraftTemplate(e.target.value)}
+                />
+                <button className="btn-ghost text-xs text-slate-500" onClick={() => setDraftTemplate(DEFAULT_LISTING_TEMPLATE)}>
+                  Reset to default design
+                </button>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button className="btn-primary" onClick={() => void saveTemplate()} disabled={saving || loading}>
+                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {saving ? 'Saving…' : isNew ? 'Save as new template' : 'Save changes'}
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
         </div>
       </div>
 
-      {/* Live preview — renders the actual template through the actual engine */}
       <div className="card">
         <div className="card-header">
           <h3 className="font-semibold text-slate-900">Preview</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Sample product data, your real store name — this is exactly what eBay will render.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Sample product data, your real store name — this is what this template renders.</p>
         </div>
         <div className="card-body">
           <div className="border border-slate-200 rounded-lg p-4 bg-white overflow-x-auto" dangerouslySetInnerHTML={{ __html: previewHtml }} />
@@ -1956,515 +1386,135 @@ function ListingTemplateSection() {
           <span className="text-sm font-medium">{toast.msg}</span>
         </div>
       )}
-
-      <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveTemplate(false)} disabled={saving || savingAll || loading}>
-          {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {saving ? 'Saving…' : 'Save Template'}
-        </button>
-        <button
-          className="btn-secondary"
-          onClick={() => void saveTemplate(true)}
-          disabled={saving || savingAll || loading || connectedStores.length === 0}
-        >
-          {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-          {savingAll ? 'Saving…' : 'Save for all stores'}
-        </button>
-      </div>
     </div>
   )
 }
-type MessageTemplate = {
-  id: string
-  name: string
-  body: string
-}
 
-const TEMPLATE_VARIABLES = [
-  { token: '{buyer_name}', desc: 'Buyer full name' },
-  { token: '{item_title}', desc: 'Item title' },
-  { token: '{tracking_number}', desc: 'Tracking number' },
-  { token: '{tracking_carrier}', desc: 'Tracking carrier' },
-  { token: '{store_name}', desc: 'Your store name' },
-  { token: '{order_id}', desc: 'eBay order ID' },
+const MESSAGE_TRIGGERS = [
+  { id: 'order_placed', label: 'Order placed', icon: Package },
+  { id: 'order_shipped', label: 'Order shipped', icon: Truck },
+  { id: 'delivered', label: 'Delivered', icon: CheckCircle2 },
+  { id: 'feedback_request', label: 'Feedback request', icon: Star },
 ]
-
-const DEFAULT_TEMPLATES: Omit<MessageTemplate, 'id'>[] = [
-  { name: 'Thank you for your order!', body: 'Hi {buyer_name}, thank you for your order of {item_title} from {store_name}! We\'re getting it ready to ship.' },
-  { name: 'Your order has shipped!', body: 'Hi {buyer_name}, your order has shipped! Tracking: {tracking_carrier} {tracking_number}.' },
-  { name: 'Your order has been delivered!', body: 'Hi {buyer_name}, your order of {item_title} has been delivered. Enjoy!' },
-  { name: 'We\'d love your feedback!', body: 'Hi {buyer_name}, glad your order arrived! We\'d really appreciate it if you left us feedback on eBay.' },
-]
-
-type TriggerKey = 'new_order' | 'tracker_added' | 'order_delivered' | 'feedback_request'
-
-const TRIGGER_LABELS: Record<TriggerKey, string> = {
-  new_order: 'New order',
-  tracker_added: 'Tracker added',
-  order_delivered: 'Order delivered',
-  feedback_request: 'Feedback request',
-}
 
 function MessagesSection() {
   const { stores } = useStoreData()
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
-  const [templates, setTemplates] = useState<MessageTemplate[]>([])
-  const [triggers, setTriggers] = useState<Record<TriggerKey, { enabled: boolean; templateId: string }>>({
-    new_order: { enabled: false, templateId: '' },
-    tracker_added: { enabled: false, templateId: '' },
-    order_delivered: { enabled: false, templateId: '' },
-    feedback_request: { enabled: false, templateId: '' },
-  })
-  const [feedbackDays, setFeedbackDays] = useState(3)
-  const [aiEnabled, setAiEnabled] = useState(false)
-  const [aiKey, setAiKey] = useState('')
-
-  const [editing, setEditing] = useState<MessageTemplate | null>(null)
-  const [isCreating, setIsCreating] = useState(false)
-
+  const [messages, setMessages] = useState<Record<string, { enabled: boolean; text: string }>>({})
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
-
-  useEffect(() => {
-    if (!toast) return
-    const timer = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(timer)
-  }, [toast])
+  const [message, setMessage] = useState<string | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-
     async function load() {
-      const { data: tplData, error: tplErr } = await supabase
-        .from('message_templates')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .order('created_at', { ascending: true })
+      const { data } = await supabase.from('store_auto_messages').select('*').eq('store_id', activeStore!.id)
       if (cancelled) return
-      if (tplErr) { setToast({ type: 'error', msg: 'Failed to load templates.' }); setLoading(false); return }
-
-      let tpls: MessageTemplate[] = (tplData || []).map((t: { id: string; name: string; body: string }) => ({ id: t.id, name: t.name, body: t.body }))
-
-      if (tpls.length === 0) {
-        const inserts = DEFAULT_TEMPLATES.map(dt => ({ store_id: activeStore!.id, ...dt }))
-        const { data: inserted, error: insErr } = await supabase.from('message_templates').insert(inserts).select('*')
-        if (cancelled) return
-        if (insErr) { setToast({ type: 'error', msg: 'Failed to seed default templates.' }); setLoading(false); return }
-        tpls = (inserted || []).map((t: { id: string; name: string; body: string }) => ({ id: t.id, name: t.name, body: t.body }))
+      const map: Record<string, { enabled: boolean; text: string }> = {}
+      for (const trigger of MESSAGE_TRIGGERS) {
+        const row = data?.find(r => r.trigger === trigger.id)
+        map[trigger.id] = { enabled: row?.enabled ?? false, text: row?.message_text ?? '' }
       }
-      setTemplates(tpls)
-
-      const { data: trigData, error: trigErr } = await supabase
-        .from('auto_message_triggers')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .maybeSingle()
-      if (cancelled) return
-      if (trigErr) { setToast({ type: 'error', msg: 'Failed to load triggers.' }); setLoading(false); return }
-
-      if (trigData) {
-        setTriggers({
-          new_order: { enabled: trigData.new_order_enabled ?? false, templateId: trigData.new_order_template_id ?? '' },
-          tracker_added: { enabled: trigData.tracker_added_enabled ?? false, templateId: trigData.tracker_added_template_id ?? '' },
-          order_delivered: { enabled: trigData.order_delivered_enabled ?? false, templateId: trigData.order_delivered_template_id ?? '' },
-          feedback_request: { enabled: trigData.feedback_request_enabled ?? false, templateId: trigData.feedback_request_template_id ?? '' },
-        })
-        setFeedbackDays(Number(trigData.feedback_send_after_days) || 3)
-        setAiEnabled(trigData.ai_auto_responder_enabled ?? false)
-        setAiKey(trigData.ai_provider_api_key ?? '')
-      } else {
-        setTriggers({
-          new_order: { enabled: false, templateId: '' },
-          tracker_added: { enabled: false, templateId: '' },
-          order_delivered: { enabled: false, templateId: '' },
-          feedback_request: { enabled: false, templateId: '' },
-        })
-        setFeedbackDays(3)
-        setAiEnabled(false)
-        setAiKey('')
-      }
+      setMessages(map)
       setLoading(false)
     }
-
     void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  function startCreate() {
-    setIsCreating(true)
-    setEditing({ id: '', name: '', body: '' })
-  }
-
-  function saveTemplate() {
-    if (!editing || !activeStore?.id) return
-    const name = editing.name.trim()
-    const body = editing.body.trim()
-    if (!name || !body) { setToast({ type: 'error', msg: 'Template name and body are required.' }); return }
-
-    async function persist() {
-      if (isCreating) {
-        const { data, error } = await supabase
-          .from('message_templates')
-          .insert({ store_id: activeStore!.id, name, body })
-          .select('*')
-          .single()
-        if (error) { setToast({ type: 'error', msg: error.message }); return }
-        setTemplates(prev => [...prev, { id: data.id, name: data.name, body: data.body }])
-      } else {
-        const { error } = await supabase
-          .from('message_templates')
-          .update({ name, body, updated_at: new Date().toISOString() })
-          .eq('id', editing!.id)
-        if (error) { setToast({ type: 'error', msg: error.message }); return }
-        setTemplates(prev => prev.map(t => t.id === editing!.id ? { ...t, name, body } : t))
-      }
-      setToast({ type: 'success', msg: 'Template saved.' })
-      setEditing(null)
-      setIsCreating(false)
-    }
-    void persist()
-  }
-
-  function deleteTemplate(id: string) {
-    async function del() {
-      const { error } = await supabase.from('message_templates').delete().eq('id', id)
-      if (error) { setToast({ type: 'error', msg: error.message }); return }
-      setTemplates(prev => prev.filter(t => t.id !== id))
-      setTriggers(prev => {
-        const next = { ...prev }
-        for (const k of Object.keys(next) as TriggerKey[]) {
-          if (next[k].templateId === id) next[k] = { ...next[k], templateId: '' }
-        }
-        return next
-      })
-      setToast({ type: 'success', msg: 'Template removed.' })
-    }
-    void del()
-  }
-
-  async function persistTriggers(storeIds: string[]) {
-    const now = new Date().toISOString()
-    for (const sid of storeIds) {
-      const payload = {
-        store_id: sid,
-        new_order_enabled: triggers.new_order.enabled,
-        new_order_template_id: triggers.new_order.templateId || null,
-        tracker_added_enabled: triggers.tracker_added.enabled,
-        tracker_added_template_id: triggers.tracker_added.templateId || null,
-        order_delivered_enabled: triggers.order_delivered.enabled,
-        order_delivered_template_id: triggers.order_delivered.templateId || null,
-        feedback_request_enabled: triggers.feedback_request.enabled,
-        feedback_request_template_id: triggers.feedback_request.templateId || null,
-        feedback_send_after_days: feedbackDays,
-        ai_auto_responder_enabled: aiEnabled,
-        ai_provider_api_key: aiKey || null,
-        updated_at: now,
-      }
-      const { error } = await supabase.from('auto_message_triggers').upsert(payload, { onConflict: 'store_id' })
-      if (error) throw new Error(error.message)
-    }
-  }
-
-  async function saveTriggers(forAllStores = false) {
+  async function save() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
-    setToast(null)
+    setSaving(true)
+    setMessage(null)
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      await persistTriggers(storeIds)
-      setToast({
-        type: 'success',
-        msg: forAllStores
-          ? `Triggers saved for all ${storeIds.length} connected stores.`
-          : 'Triggers saved.',
-      })
+      for (const trigger of MESSAGE_TRIGGERS) {
+        const row = messages[trigger.id]
+        const { error } = await supabase.from('store_auto_messages').upsert({
+          store_id: activeStore.id,
+          trigger: trigger.id,
+          enabled: row?.enabled ?? false,
+          message_text: row?.text ?? '',
+        }, { onConflict: 'store_id,trigger' })
+        if (error) throw new Error(error.message)
+      }
+      setMessage('Auto messages saved.')
     } catch (err) {
-      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to save triggers.' })
+      setMessage(err instanceof Error ? err.message : 'Failed to save')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
 
-  if (loading) {
-    return <div className="p-6 text-center text-sm text-slate-500">Loading auto messages…</div>
-  }
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* LEFT PANEL — Templates */}
-        <div className="card">
-          <div className="card-header flex-row items-center justify-between">
-            <div>
-              <h3 className="font-semibold text-slate-900">Message Templates</h3>
-              <p className="text-xs text-slate-500 mt-0.5">Reusable message snippets with dynamic placeholders.</p>
-            </div>
-            <button className="btn-primary text-sm" onClick={startCreate}>
-              <Plus className="w-4 h-4" /> Add Template
-            </button>
-          </div>
-          <div className="card-body space-y-2">
-            {templates.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-6">No templates yet.</p>
-            ) : templates.map(tpl => (
-              <div key={tpl.id} className="flex items-start justify-between gap-3 p-3 rounded-lg border border-slate-200 hover:border-slate-300 transition-colors">
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium text-slate-900 truncate">{tpl.name}</p>
-                  <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{tpl.body}</p>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    className="btn-ghost text-slate-500 hover:text-brand-600"
-                    onClick={() => { setEditing({ ...tpl }); setIsCreating(false) }}
-                    title="Edit"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    className="btn-ghost text-slate-500 hover:text-error-600"
-                    onClick={() => deleteTemplate(tpl.id)}
-                    title="Remove"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+    <div className="space-y-3">
+      {MESSAGE_TRIGGERS.map(trigger => (
+        <SettingsAccordion key={trigger.id} title={trigger.label}>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <trigger.icon className="h-4 w-4 text-brand-600" />
+                <p className="text-sm font-medium text-slate-900">Send automatically</p>
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* RIGHT PANEL — Triggers */}
-        <div className="card">
-          <div className="card-header">
-            <h3 className="font-semibold text-slate-900">Triggers</h3>
-            <p className="text-xs text-slate-500 mt-0.5">Automatically send a template when an order event fires.</p>
-          </div>
-          <div className="card-body space-y-3">
-            {(Object.keys(TRIGGER_LABELS) as TriggerKey[]).map(key => (
-              <div key={key} className="p-3 bg-slate-50 rounded-lg space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Toggle
-                      checked={triggers[key].enabled}
-                      onChange={v => setTriggers(prev => ({ ...prev, [key]: { ...prev[key], enabled: v } }))}
-                    />
-                    <span className="text-sm font-medium text-slate-700">{TRIGGER_LABELS[key]}</span>
-                    {key === 'order_delivered' && (
-                      <span className="text-[10px] font-semibold uppercase tracking-wide bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded">Soon</span>
-                    )}
-                  </div>
-                </div>
-                {triggers[key].enabled && (
-                  <select
-                    className="input text-sm"
-                    value={triggers[key].templateId}
-                    onChange={e => setTriggers(prev => ({ ...prev, [key]: { ...prev[key], templateId: e.target.value } }))}
-                  >
-                    <option value="">— Select a template —</option>
-                    {templates.map(t => (
-                      <option key={t.id} value={t.id}>{t.name}</option>
-                    ))}
-                  </select>
-                )}
-                {key === 'feedback_request' && triggers[key].enabled && (
-                  <div className="max-w-xs">
-                    <label className="label">Send after (days)</label>
-                    <input
-                      type="number"
-                      min={0}
-                      className="input text-sm"
-                      value={feedbackDays}
-                      onChange={e => setFeedbackDays(Math.max(0, Number(e.target.value)))}
-                    />
-                  </div>
-                )}
-              </div>
-            ))}
-
-            <div className="flex items-center gap-3 pt-2">
-              <button className="btn-primary" onClick={() => void saveTriggers(false)} disabled={saving || savingAll}>
-                {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                className="btn-secondary"
-                onClick={() => void saveTriggers(true)}
-                disabled={saving || savingAll || connectedStores.length === 0}
-              >
-                {savingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                {savingAll ? 'Saving…' : 'Save for all stores'}
-              </button>
+              <Toggle
+                checked={messages[trigger.id]?.enabled ?? false}
+                onChange={v => setMessages(prev => ({ ...prev, [trigger.id]: { enabled: v, text: prev[trigger.id]?.text ?? '' } }))}
+              />
             </div>
-          </div>
-        </div>
-      </div>
-
-      {/* AI Auto-Responder */}
-      <div className="card">
-        <div className="card-header">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-brand-600" />
-            <h3 className="font-semibold text-slate-900">AI Customer Support &amp; Inquiry Auto-Responder</h3>
-          </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            When enabled, AI automatically analyzes incoming buyer product questions and responds based on Amazon product specs and store policy.
-          </p>
-        </div>
-        <div className="card-body space-y-4">
-          <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-            <Toggle checked={aiEnabled} onChange={setAiEnabled} />
-            <div>
-              <p className="text-sm font-medium text-slate-700">Enable AI Auto-Responder for Buyer Messages</p>
-              <p className="text-xs text-slate-500 mt-0.5">Intercepts inbound buyer messages and drafts a response using your store context.</p>
-            </div>
-          </div>
-          <div className="max-w-md">
-            <label className="label">AI Provider API Key (OpenAI / Anthropic)</label>
-            <input
-              className="input"
-              type="password"
-              placeholder="sk-… (optional — disabled for now)"
-              value={aiKey}
-              onChange={e => setAiKey(e.target.value)}
-              disabled
+            <textarea
+              className="input min-h-[100px]"
+              value={messages[trigger.id]?.text ?? ''}
+              onChange={e => setMessages(prev => ({ ...prev, [trigger.id]: { enabled: prev[trigger.id]?.enabled ?? false, text: e.target.value } }))}
+              placeholder="Message text — use {{buyer_name}}, {{item_title}}, {{tracking_number}}"
             />
-            <p className="text-xs text-slate-400 mt-1">API key field is placeholder only until AI activation is released.</p>
           </div>
-        </div>
+        </SettingsAccordion>
+      ))}
+      <div className="flex items-center gap-3 pt-2">
+        <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving ? 'Saving…' : 'Save all messages'}
+        </button>
+        {message && <span className="text-sm text-success-600">{message}</span>}
       </div>
-
-      {/* Toast */}
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 right-6 z-50 flex items-center gap-2.5 rounded-xl px-4 py-3 shadow-lg transition-all',
-          toast.type === 'success' ? 'bg-success-600 text-white' : 'bg-error-600 text-white',
-        )}>
-          {toast.type === 'success' ? <CheckCircle2 className="h-5 w-5" /> : <AlertCircle className="h-5 w-5" />}
-          <span className="text-sm font-medium">{toast.msg}</span>
-        </div>
-      )}
-
-      {/* Template editor modal */}
-      {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="w-full max-w-lg rounded-2xl bg-white shadow-xl border border-slate-200">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <h3 className="font-semibold text-slate-900">{isCreating ? 'New Template' : 'Edit Template'}</h3>
-              <button className="btn-ghost text-slate-400" onClick={() => { setEditing(null); setIsCreating(false) }}>
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              <div>
-                <label className="label">Template name</label>
-                <input
-                  className="input"
-                  placeholder="e.g. Order shipped"
-                  value={editing.name}
-                  onChange={e => setEditing({ ...editing, name: e.target.value })}
-                />
-              </div>
-              <div>
-                <label className="label">Message body</label>
-                <textarea
-                  className="input min-h-[120px] resize-y text-sm"
-                  placeholder="Hi {buyer_name}, …"
-                  value={editing.body}
-                  onChange={e => setEditing({ ...editing, body: e.target.value })}
-                />
-              </div>
-              <div>
-                <p className="text-xs font-medium text-slate-600 mb-1.5">Available placeholders:</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {TEMPLATE_VARIABLES.map(v => (
-                    <button
-                      key={v.token}
-                      type="button"
-                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition-colors"
-                      title={v.desc}
-                      onClick={() => setEditing(prev => prev ? { ...prev, body: prev.body + ' ' + v.token } : prev)}
-                    >
-                      {v.token}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-3 px-5 py-4 border-t border-slate-100">
-              <button className="btn-secondary" onClick={() => { setEditing(null); setIsCreating(false) }}>Cancel</button>
-              <button className="btn-primary" onClick={() => void saveTemplate()}>
-                <Save className="w-4 h-4" /> Save Template
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }
 
-const SHIPPING_RANGES = ['0-2 days', '3-7 days'] as const
-const RATING_OPTIONS = [3.0, 3.5, 4.0, 4.5, 5.0]
-
-type FilterSettings = {
-  shipping_time_ranges: string[]
-  min_rating: number
-  min_review_count: number
-  fba_only: boolean
-  apply_tax: boolean
-}
+const SHIPPING_RANGES = ['0-2 days', '3-7 days', '8-13 days', '14 or more days']
 
 function AmazonFiltersSection() {
   const { stores } = useStoreData()
   const connectedStores = stores.filter(s => s.connected)
-  const [activeTab, setActiveTab] = useState<'amazon' | 'walmart' | 'aliexpress'>('amazon')
-  const [shippingRanges, setShippingRanges] = useState<string[]>([])
-  const [minRating, setMinRating] = useState(4.0)
-  const [minReviewCount, setMinReviewCount] = useState(1)
+  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+
+  const [minRating, setMinRating] = useState('')
+  const [minReviewCount, setMinReviewCount] = useState('')
   const [fbaOnly, setFbaOnly] = useState(false)
+  const [shippingRanges, setShippingRanges] = useState<string[]>([])
   const [applyTax, setApplyTax] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [savingAll, setSavingAll] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [dropdownOpen, setDropdownOpen] = useState(false)
-
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
-    setMessage(null)
-    setError(null)
-
     async function load() {
-      const { data, error: dbErr } = await supabase
-        .from('filter_settings')
-        .select('*')
-        .eq('store_id', activeStore!.id)
-        .maybeSingle()
+      const { data } = await supabase.from('filter_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
       if (cancelled) return
-      if (dbErr) { setError('Failed to load filter settings.'); setLoading(false); return }
       if (data) {
-        setShippingRanges(data.shipping_time_ranges || [])
-        setMinRating(Number(data.min_rating) || 4.0)
-        setMinReviewCount(Number(data.min_review_count) || 1)
-        setFbaOnly(data.fba_only ?? false)
-        setApplyTax(data.apply_tax ?? false)
-      } else {
-        setShippingRanges([])
-        setMinRating(4.0)
-        setMinReviewCount(1)
-        setFbaOnly(false)
-        setApplyTax(false)
+        setMinRating(data.min_rating != null ? String(data.min_rating) : '')
+        setMinReviewCount(data.min_review_count != null ? String(data.min_review_count) : '')
+        setFbaOnly(!!data.fba_only)
+        setShippingRanges((data.shipping_time_ranges as string[]) || [])
+        setApplyTax(!!data.apply_tax)
       }
       setLoading(false)
     }
@@ -2473,228 +1523,83 @@ function AmazonFiltersSection() {
   }, [activeStore?.id])
 
   function toggleRange(range: string) {
-    setShippingRanges(prev =>
-      prev.includes(range) ? prev.filter(r => r !== range) : [...prev, range]
-    )
+    setShippingRanges(prev => prev.includes(range) ? prev.filter(r => r !== range) : [...prev, range])
   }
 
-  async function saveFilters(forAllStores: boolean) {
+  async function save() {
     if (!activeStore?.id) return
-    if (forAllStores) setSavingAll(true); else setSaving(true)
+    setSaving(true)
     setMessage(null)
-    setError(null)
-
-    const payload = {
-      shipping_time_ranges: shippingRanges,
-      min_rating: minRating,
-      min_review_count: minReviewCount,
-      fba_only: fbaOnly,
-      apply_tax: applyTax,
-      updated_at: new Date().toISOString(),
-    }
-
     try {
-      const storeIds = forAllStores ? connectedStores.map(s => s.id) : [activeStore.id]
-      for (const sid of storeIds) {
-        const { data: existing } = await supabase
-          .from('filter_settings')
-          .select('id')
-          .eq('store_id', sid)
-          .maybeSingle()
-        if (existing) {
-          const { error: uErr } = await supabase
-            .from('filter_settings')
-            .update(payload)
-            .eq('store_id', sid)
-          if (uErr) throw new Error(uErr.message)
-        } else {
-          const { error: iErr } = await supabase
-            .from('filter_settings')
-            .insert({ store_id: sid, ...payload })
-          if (iErr) throw new Error(iErr.message)
-        }
-      }
-      setMessage(forAllStores
-        ? `Filters applied to all ${storeIds.length} connected stores.`
-        : 'Filters saved for this store.')
+      const { error } = await supabase.from('filter_settings').upsert({
+        store_id: activeStore.id,
+        min_rating: minRating ? Number(minRating) : null,
+        min_review_count: minReviewCount ? Number(minReviewCount) : null,
+        fba_only: fbaOnly,
+        shipping_time_ranges: shippingRanges,
+        apply_tax: applyTax,
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage('Filters saved.')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save filters.')
+      setMessage(err instanceof Error ? err.message : 'Failed to save')
     } finally {
-      if (forAllStores) setSavingAll(false); else setSaving(false)
+      setSaving(false)
     }
   }
+
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-4">
-      {/* Source sub-tabs */}
-      <div className="flex gap-2">
-        <button
-          onClick={() => setActiveTab('amazon')}
-          className={cn(
-            'px-4 py-2 rounded-lg text-sm font-medium transition-colors',
-            activeTab === 'amazon'
-              ? 'bg-brand-600 text-white shadow-sm'
-              : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50',
-          )}
-        >Amazon</button>
-        <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-slate-400 bg-slate-100 cursor-not-allowed">
-          Walmart
-          <span className="text-[10px] font-semibold uppercase tracking-wide bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Soon</span>
-        </span>
-        <span className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-slate-400 bg-slate-100 cursor-not-allowed">
-          AliExpress
-          <span className="text-[10px] font-semibold uppercase tracking-wide bg-slate-200 text-slate-500 px-1.5 py-0.5 rounded">Soon</span>
-        </span>
-      </div>
-
-      {/* Amazon filter card */}
-      <div className="card">
-        <div className="card-header">
-          <div className="flex items-center gap-2">
-            <Package className="h-5 w-5 text-brand-600" />
-            <h3 className="font-semibold text-slate-900">Amazon Filters</h3>
-          </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            {activeStore?.ebayUsername || activeStore?.nickname || 'No store'}
-            — These filters apply when sourcing products from Amazon.
-          </p>
+    <div className="card">
+      <div className="card-body space-y-5">
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="label">Minimum rating
+            <input className="input mt-1" value={minRating} onChange={e => setMinRating(e.target.value)} placeholder="e.g. 4" />
+          </label>
+          <label className="label">Minimum review count
+            <input className="input mt-1" value={minReviewCount} onChange={e => setMinReviewCount(e.target.value)} placeholder="e.g. 50" />
+          </label>
         </div>
-        <div className="card-body space-y-5">
-          {loading ? (
-            <div className="p-6 text-center text-sm text-slate-500">Loading filter settings…</div>
-          ) : (
-            <>
-              {/* Product Shipping Time */}
-              <div>
-                <label className="label flex items-center gap-1.5">
-                  <Clock className="h-3.5 w-3.5 text-slate-400" />
-                  Product Shipping Time
-                </label>
-                <div className="relative mt-1">
-                  <button
-                    type="button"
-                    onClick={() => setDropdownOpen(o => !o)}
-                    className="input flex items-center justify-between text-left"
-                  >
-                    <span className={cn(shippingRanges.length === 0 && 'text-slate-400')}>
-                      {shippingRanges.length === 0
-                        ? 'Select shipping times'
-                        : shippingRanges.length === 1
-                          ? shippingRanges[0]
-                          : `${shippingRanges.length} ranges selected`}
-                    </span>
-                    <ChevronDown className={cn('h-4 w-4 text-slate-400 transition-transform', dropdownOpen && 'rotate-180')} />
-                  </button>
-                  {dropdownOpen && (
-                    <div className="absolute z-10 mt-1 w-full rounded-lg border border-slate-200 bg-white shadow-lg">
-                      {SHIPPING_RANGES.map(range => (
-                        <label
-                          key={range}
-                          className="flex items-center gap-2.5 px-3 py-2.5 hover:bg-slate-50 cursor-pointer text-sm"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={shippingRanges.includes(range)}
-                            onChange={() => toggleRange(range)}
-                            className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
-                          />
-                          <span className="text-slate-700">{range}</span>
-                        </label>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
 
-              {/* Minimum Product Rating */}
-              <div className="max-w-xs">
-                <label className="label flex items-center gap-1.5">
-                  <Star className="h-3.5 w-3.5 text-slate-400" />
-                  Minimum Product Rating
-                </label>
-                <select
-                  className="input mt-1"
-                  value={minRating}
-                  onChange={e => setMinRating(Number(e.target.value))}
-                >
-                  {RATING_OPTIONS.map(r => (
-                    <option key={r} value={r}>{r.toFixed(1)} ★</option>
-                  ))}
-                </select>
-              </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-slate-900">Accept only FBA offers</p>
+            <p className="text-xs text-slate-500">Skip products that Amazon doesn't fulfill itself.</p>
+          </div>
+          <Toggle checked={fbaOnly} onChange={setFbaOnly} />
+        </div>
 
-              {/* Minimum Review Count */}
-              <div className="max-w-xs">
-                <label className="label flex items-center gap-1.5">
-                  <MessageSquareText className="h-3.5 w-3.5 text-slate-400" />
-                  Product Minimum Review Count
-                </label>
-                <input
-                  type="number"
-                  min={0}
-                  className="input mt-1"
-                  value={minReviewCount}
-                  onChange={e => setMinReviewCount(Math.max(0, Number(e.target.value)))}
-                />
-              </div>
+        <div>
+          <p className="text-sm font-medium text-slate-900 mb-2">Acceptable shipping time</p>
+          <div className="flex flex-wrap gap-2">
+            {SHIPPING_RANGES.map(range => (
+              <button
+                key={range}
+                onClick={() => toggleRange(range)}
+                className={cn(
+                  'text-xs px-3 py-1.5 rounded-full border',
+                  shippingRanges.includes(range) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50',
+                )}
+              >{range}</button>
+            ))}
+          </div>
+        </div>
 
-              {/* FBA Only */}
-              <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-                <Toggle checked={fbaOnly} onChange={setFbaOnly} />
-                <div className="flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <p className="text-sm font-medium text-slate-700">Accept Only Fulfilled By Amazon Offers</p>
-                    <span className="group relative inline-flex">
-                      <HelpCircle className="h-3.5 w-3.5 text-slate-400 cursor-help" />
-                      <span className="pointer-events-none absolute left-5 top-0 z-10 w-56 rounded-md bg-slate-800 px-2.5 py-1.5 text-xs text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
-                        When enabled, only Prime / FBA seller offers are accepted. Non-FBA offers are filtered out during product sourcing.
-                      </span>
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 mt-0.5">Ignores seller offers that are not Prime or Fulfilled by Amazon.</p>
-                </div>
-              </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-slate-900">Apply estimated tax to cost</p>
+            <p className="text-xs text-slate-500">Adds ~7% to the Amazon cost before calculating the eBay price.</p>
+          </div>
+          <Toggle checked={applyTax} onChange={setApplyTax} />
+        </div>
 
-              {/* Apply Tax */}
-              <div className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg">
-                <Toggle checked={applyTax} onChange={setApplyTax} />
-                <div className="flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <p className="text-sm font-medium text-slate-700">Apply Tax to Profit Calculations</p>
-                    <span className="group relative inline-flex">
-                      <HelpCircle className="h-3.5 w-3.5 text-slate-400 cursor-help" />
-                      <span className="pointer-events-none absolute left-5 top-0 z-10 w-56 rounded-md bg-slate-800 px-2.5 py-1.5 text-xs text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg">
-                        When enabled, estimated sales tax is included in cost calculations when computing profit margins.
-                      </span>
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500 mt-0.5">Includes estimated sales tax in cost calculations.</p>
-                </div>
-              </div>
-
-              {/* Action buttons */}
-              <div className="flex items-center gap-3 pt-1">
-                <button
-                  className="btn-primary"
-                  onClick={() => void saveFilters(false)}
-                  disabled={saving || savingAll}
-                >
-                  {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-                <button
-                  className="btn-secondary"
-                  onClick={() => void saveFilters(true)}
-                  disabled={saving || savingAll || connectedStores.length === 0}
-                >
-                  {savingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                  {savingAll ? 'Saving…' : 'Save for all stores'}
-                </button>
-                {message && <span className="flex items-center gap-1 text-sm text-success-600"><CheckCircle2 className="h-4 w-4" /> {message}</span>}
-                {error && <span className="flex items-center gap-1 text-sm text-error-600"><AlertCircle className="h-4 w-4" /> {error}</span>}
-              </div>
-            </>
-          )}
+        <div className="flex items-center gap-3">
+          <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {saving ? 'Saving…' : 'Save filters'}
+          </button>
+          {message && <span className="text-sm text-success-600">{message}</span>}
         </div>
       </div>
     </div>
@@ -2702,74 +1607,22 @@ function AmazonFiltersSection() {
 }
 
 function TeamSection() {
-  const [inviteEmail, setInviteEmail] = useState('')
-
   return (
-    <div className="space-y-6">
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Invite a Team Member</h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            A VA can list, edit listings, message buyers, and add tracking — they can't see billing, connect/disconnect stores, or business-policy settings.
-          </p>
-        </div>
-        <div className="card-body">
-          <div className="flex gap-3 max-w-md">
-            <div className="relative flex-1">
-              <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                className="input pl-9"
-                value={inviteEmail}
-                onChange={e => setInviteEmail(e.target.value)}
-                placeholder="va@example.com"
-              />
-            </div>
-            <button className="btn-primary"><Plus className="w-4 h-4" /> Invite</button>
-          </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-header"><h3 className="font-semibold text-slate-900">Team Members</h3></div>
+    <div className="card">
+      <div className="card-body">
         <div className="divide-y divide-slate-100">
           {teamMembers.map(member => (
-            <div key={member.id} className="flex items-center gap-4 p-4">
-              <div className="w-10 h-10 rounded-full bg-brand-600 text-white flex items-center justify-center font-semibold">
-                {member.name.charAt(0)}
+            <div key={member.id} className="flex items-center gap-3 py-3">
+              <div className="w-9 h-9 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-sm font-semibold shrink-0">
+                {member.name.split(' ').map(n => n[0]).join('')}
               </div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900">{member.name}</p>
+                <p className="text-sm font-medium text-slate-900 truncate">{member.name}</p>
                 <p className="text-xs text-slate-500">{member.email}</p>
               </div>
-              <span className={cn('badge', member.role === 'owner' ? 'badge-info' : 'badge-neutral')}>
-                {member.role.toUpperCase()}
-              </span>
-              <span className="text-xs text-slate-400">Joined {formatDate(member.joinedDate)}</span>
-              {member.role !== 'owner' && (
-                <button className="btn-ghost text-error-600 hover:bg-error-50"><Trash2 className="w-4 h-4" /></button>
-              )}
+              <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full">{member.role}</span>
             </div>
           ))}
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="card-header"><h3 className="font-semibold text-slate-900">Team Access</h3></div>
-        <div className="card-body">
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            {['List items', 'Edit listings', 'Message buyers', 'Add tracking', 'View orders', 'View profit'].map(perm => (
-              <div key={perm} className="flex items-center gap-2 p-2 bg-slate-50 rounded-lg">
-                <span className="w-2 h-2 rounded-full bg-success-500" />
-                <span className="text-slate-700">{perm}</span>
-              </div>
-            ))}
-            {['Billing', 'Connect/disconnect stores', 'Business policy settings'].map(perm => (
-              <div key={perm} className="flex items-center gap-2 p-2 bg-error-50 rounded-lg">
-                <span className="w-2 h-2 rounded-full bg-error-500" />
-                <span className="text-slate-700">{perm}</span>
-              </div>
-            ))}
-          </div>
         </div>
       </div>
     </div>
