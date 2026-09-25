@@ -659,6 +659,7 @@ export default function ListItems() {
         .from('listing_templates')
         .select('template')
         .eq('store_id', singleStore?.id || '')
+        .eq('is_active', true)
         .maybeSingle()
       const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
       setCurrentListingTemplate(listingTemplate)
@@ -667,6 +668,11 @@ export default function ListItems() {
         title: fetched?.title || '',
         store_name: storeName,
         main_image: fetched?.mainImage || fetched?.images?.[0] || '',
+        // Extra product photos beyond the main one, for templates that show a supporting
+        // gallery strip (e.g. Settings > Templates custom designs). Static only — eBay's
+        // Active Content Policy blocks JavaScript in listing descriptions, so these can't be
+        // click-to-swap; eBay's own native gallery above the description already covers that.
+        gallery: (fetched?.images || []).slice(1, 6),
         product_description: fetched?.description || '',
         feature_bullets: fetched?.bulletPoints || [],
       })
@@ -747,6 +753,7 @@ export default function ListItems() {
         title: result.title || product.title || '',
         store_name: storeName,
         main_image: product.mainImage || product.images?.[0] || '',
+        gallery: (product.images || []).slice(1, 6),
         product_description: result.description || product.description || '',
         feature_bullets: product.bulletPoints || [],
       })
