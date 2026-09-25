@@ -73,7 +73,7 @@ export default function Dashboard() {
   const trendTotal = trendData.reduce((sum, d) => sum + d[trendMetric], 0)
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-7xl">
       {/* Welcome banner */}
       <div className="card overflow-hidden">
         <div className="bg-gradient-to-r from-brand-600 to-brand-700 px-6 py-5 flex items-center justify-between">
