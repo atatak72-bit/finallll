@@ -9,7 +9,7 @@ export default function Account() {
   const [confirmPw, setConfirmPw] = useState('')
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6">
+    <div className="max-w-3xl space-y-6">
       {/* Account info */}
       <div className="card">
         <div className="card-header flex items-center gap-2">
