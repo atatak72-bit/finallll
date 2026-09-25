@@ -35,7 +35,7 @@ export default function Settings() {
   const activeStoreName = activeStore?.ebayUsername || activeStore?.nickname || 'No store connected'
 
   return (
-    <div className="mx-auto max-w-6xl">
+    <div className="max-w-6xl">
       <div className="mb-6">
         <p className="text-xs text-slate-400">Home › Settings</p>
         <h1 className="mt-2 text-2xl font-bold text-slate-900">Settings</h1>
