@@ -1430,6 +1430,13 @@ function ListingTemplateSection() {
   )
 }
 
+const MESSAGE_TRIGGERS = [
+  { id: 'order_placed', label: 'Order placed', icon: Package },
+  { id: 'order_shipped', label: 'Order shipped', icon: Truck },
+  { id: 'delivered', label: 'Delivered', icon: CheckCircle2 },
+  { id: 'feedback_request', label: 'Feedback request', icon: Star },
+]
+
 function MessagesSection() {
   const { stores } = useStoreData()
   const connectedStores = stores.filter(s => s.connected)
