@@ -4,7 +4,7 @@ import { formatCurrency, formatDate, cn } from '../lib/utils'
 
 export default function Billing() {
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <div className="max-w-5xl space-y-6">
       {/* Current plan */}
       <div className="card overflow-hidden">
         <div className="card-header">
