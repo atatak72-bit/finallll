@@ -1161,7 +1161,7 @@ export default function ListItems() {
   ]
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6 max-w-7xl">
       <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-2">
         {tabs.map(t => (
           <button
