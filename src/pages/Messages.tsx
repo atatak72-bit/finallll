@@ -17,7 +17,7 @@ export default function Messages() {
   }
 
   return (
-    <div className="max-w-7xl mx-auto">
+    <div className="max-w-7xl">
       <div className="card overflow-hidden">
         <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4">
           {/* Conversation list */}
