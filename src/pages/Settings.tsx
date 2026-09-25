@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import {
   DollarSign, Tag, Filter, MessageSquare, Users,
   Store, Save, Plus, Trash2, Info, Mail, ChevronDown,
@@ -1074,9 +1074,13 @@ function ListingTemplateSection() {
   const [draftTemplate, setDraftTemplate] = useState(DEFAULT_LISTING_TEMPLATE)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [copying, setCopying] = useState(false)
   const [settingActiveId, setSettingActiveId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [fullView, setFullView] = useState(false)
+  const gutterRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const variables = [
     { name: '{{title}}', desc: 'Product title' },
@@ -1133,6 +1137,15 @@ function ListingTemplateSection() {
     setDraftTemplate(row.template)
   }
 
+  function handleDropdownChange(value: string) {
+    if (value === 'new') {
+      startNewTemplate()
+      return
+    }
+    const row = templates.find(t => t.id === value)
+    if (row) selectTemplate(row)
+  }
+
   function startNewTemplate() {
     setSelectedId('new')
     setDraftName(`Template ${templates.length + 1}`)
@@ -1187,6 +1200,48 @@ function ListingTemplateSection() {
     }
   }
 
+  // Pushes the CURRENTLY EDITED template's content to every other connected store: if that
+  // store already has an active template, its content is overwritten (its own name is left
+  // untouched); if the store has no templates at all yet, a new one is created for it, named
+  // and set active immediately so that store always ends up with a usable active template too.
+  async function copyToAllStores() {
+    if (!activeStore?.id) return
+    const others = connectedStores.filter(s => s.id !== activeStore.id)
+    if (others.length === 0) {
+      setToast({ type: 'error', msg: 'No other connected stores to copy to.' })
+      return
+    }
+    setCopying(true)
+    setToast(null)
+    try {
+      for (const store of others) {
+        const { data: existingActive } = await supabase
+          .from('listing_templates')
+          .select('id')
+          .eq('store_id', store.id)
+          .eq('is_active', true)
+          .maybeSingle()
+        if (existingActive?.id) {
+          const { error } = await supabase
+            .from('listing_templates')
+            .update({ template: draftTemplate, updated_at: new Date().toISOString() })
+            .eq('id', existingActive.id)
+          if (error) throw new Error(error.message)
+        } else {
+          const { error } = await supabase
+            .from('listing_templates')
+            .insert({ store_id: store.id, name: draftName.trim() || 'Template 1', template: draftTemplate, is_active: true })
+          if (error) throw new Error(error.message)
+        }
+      }
+      setToast({ type: 'success', msg: `Copied to ${others.length} other store${others.length === 1 ? '' : 's'} as their active template.` })
+    } catch (err) {
+      setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to copy to other stores.' })
+    } finally {
+      setCopying(false)
+    }
+  }
+
   async function setActive(id: string) {
     if (!activeStore?.id) return
     setSettingActiveId(id)
@@ -1231,6 +1286,13 @@ function ListingTemplateSection() {
 
   const isNew = selectedId === 'new'
   const currentIsActive = !isNew && !!templates.find(t => t.id === selectedId)?.is_active
+  const lineCount = draftTemplate.split('\n').length
+
+  function syncGutterScroll() {
+    if (gutterRef.current && textareaRef.current) {
+      gutterRef.current.scrollTop = textareaRef.current.scrollTop
+    }
+  }
 
   const previewHtml = fitDescriptionToBudget(draftTemplate, {
     title: 'Wireless Bluetooth Earbuds Pro Max',
@@ -1250,130 +1312,108 @@ function ListingTemplateSection() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="card">
-        <div className="card-header flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <h3 className="font-semibold text-slate-900">Listing Templates</h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              For <span className="font-medium text-slate-700">{activeStoreName}</span>. Keep as many designs as you like — the one marked <span className="font-medium text-slate-700">Active</span> is what every new listing uses.
-            </p>
-          </div>
-          <button onClick={startNewTemplate} className="btn-secondary text-sm">
-            <Plus className="w-4 h-4" /> New template
-          </button>
+    <div className="card">
+      <div className="card-header">
+        <div>
+          <h3 className="font-semibold text-slate-900">Listing template</h3>
+          <p className="text-xs text-slate-500 mt-0.5">
+            For <span className="font-medium text-slate-700">{activeStoreName}</span>. The template marked Active is what every new listing uses automatically.
+          </p>
         </div>
-        <div className="card-body">
-          {loading ? (
-            <div className="p-6 text-center text-sm text-slate-500">Loading your templates…</div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
-              <div className="md:col-span-1 space-y-2">
-                {templates.map(t => (
-                  <div
-                    key={t.id}
-                    className={cn(
-                      'rounded-lg border p-3 cursor-pointer transition-colors',
-                      selectedId === t.id ? 'border-brand-400 bg-brand-50' : 'border-slate-200 hover:border-slate-300',
-                    )}
-                    onClick={() => selectTemplate(t)}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-sm font-medium text-slate-800 truncate">{t.name}</p>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); void deleteTemplate(t.id) }}
-                        className="text-slate-300 hover:text-error-600 shrink-0"
-                        title="Delete this template"
-                      >
-                        {deletingId === t.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                      </button>
-                    </div>
-                    {t.is_active ? (
-                      <span className="inline-flex items-center gap-1 text-[11px] text-success-700 bg-success-50 px-1.5 py-0.5 rounded-full mt-1.5">
-                        <CheckCircle2 className="w-3 h-3" /> Active
-                      </span>
-                    ) : (
-                      <button
-                        onClick={(e) => { e.stopPropagation(); void setActive(t.id) }}
-                        disabled={settingActiveId === t.id}
-                        className="text-[11px] text-brand-600 hover:text-brand-700 font-medium mt-1.5"
-                      >
-                        {settingActiveId === t.id ? 'Setting…' : 'Set as active'}
-                      </button>
-                    )}
-                  </div>
-                ))}
-                {isNew && (
-                  <div className="rounded-lg border border-brand-400 bg-brand-50 p-3">
-                    <p className="text-sm font-medium text-slate-800">New template</p>
-                    <p className="text-[11px] text-slate-500 mt-1">Not saved yet</p>
-                  </div>
-                )}
-                {templates.length === 0 && !isNew && (
-                  <p className="text-xs text-slate-400">No templates yet.</p>
-                )}
-              </div>
+      </div>
+      <div className="card-body space-y-5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <select
+            className="input flex-1 min-w-[220px] max-w-sm"
+            value={selectedId}
+            onChange={e => handleDropdownChange(e.target.value)}
+          >
+            {templates.map(t => (
+              <option key={t.id} value={t.id}>{t.name}{t.is_active ? ' (Active)' : ''}</option>
+            ))}
+            <option value="new">+ New template…</option>
+          </select>
+          {!isNew && !currentIsActive && (
+            <button onClick={() => void setActive(selectedId as string)} className="btn-secondary text-sm">
+              {settingActiveId === selectedId ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+              Set as active
+            </button>
+          )}
+          {currentIsActive && (
+            <span className="inline-flex items-center gap-1 text-xs text-success-700 bg-success-50 px-2.5 py-1.5 rounded-lg">
+              <CheckCircle2 className="w-3.5 h-3.5" /> Active
+            </span>
+          )}
+          <button onClick={() => setDraftTemplate(DEFAULT_LISTING_TEMPLATE)} className="btn-ghost text-sm text-slate-500">
+            <RotateCcw className="w-3.5 h-3.5" /> Reset
+          </button>
+          {!isNew && (
+            <button onClick={() => void deleteTemplate(selectedId as string)} className="btn-ghost text-sm text-error-600" disabled={deletingId === selectedId}>
+              {deletingId === selectedId ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+            </button>
+          )}
+        </div>
 
-              <div className="md:col-span-3 space-y-4">
-                <div className="flex items-center gap-3">
-                  <input
-                    className="input flex-1"
-                    value={draftName}
-                    onChange={e => setDraftName(e.target.value)}
-                    placeholder="Template name"
-                  />
-                  {!isNew && !currentIsActive && (
-                    <button onClick={() => void setActive(selectedId as string)} className="btn-secondary text-sm shrink-0">
-                      Set as active
-                    </button>
-                  )}
-                  {currentIsActive && (
-                    <span className="inline-flex items-center gap-1 text-xs text-success-700 bg-success-50 px-2.5 py-1.5 rounded-lg shrink-0">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Active
-                    </span>
-                  )}
-                </div>
+        <input
+          className="input"
+          value={draftName}
+          onChange={e => setDraftName(e.target.value)}
+          placeholder="Template name"
+        />
 
-                <div className="flex flex-wrap gap-2">
-                  {variables.map(v => (
-                    <button
-                      key={v.name}
-                      onClick={() => insertVariable(v.name)}
-                      className="px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded text-xs font-mono text-slate-700 transition"
-                      title={v.desc}
-                    >
-                      {v.name}
-                    </button>
-                  ))}
+        <div className={cn('grid gap-4', fullView ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2')}>
+          {(!fullView || fullView) && (
+            <div className={cn(fullView && 'hidden lg:block')}>
+              <p className="text-xs font-semibold text-slate-500 mb-1.5">Listing template</p>
+              <div className="flex border border-slate-200 rounded-lg overflow-hidden">
+                <div
+                  ref={gutterRef}
+                  className="bg-slate-50 text-right text-[11px] leading-5 font-mono text-slate-400 py-2 px-2 select-none overflow-hidden shrink-0"
+                  style={{ height: 320 }}
+                >
+                  {Array.from({ length: lineCount }, (_, i) => <div key={i}>{i + 1}</div>)}
                 </div>
                 <textarea
-                  className="input min-h-[260px] resize-y font-mono text-xs"
+                  ref={textareaRef}
+                  className="flex-1 font-mono text-[11px] leading-5 p-2 outline-none resize-none"
+                  style={{ height: 320 }}
                   value={draftTemplate}
                   onChange={e => setDraftTemplate(e.target.value)}
+                  onScroll={syncGutterScroll}
+                  spellCheck={false}
                 />
-                <button className="btn-ghost text-xs text-slate-500" onClick={() => setDraftTemplate(DEFAULT_LISTING_TEMPLATE)}>
-                  Reset to default design
-                </button>
-
-                <div className="flex items-center gap-3 pt-2">
-                  <button className="btn-primary" onClick={() => void saveTemplate()} disabled={saving || loading}>
-                    {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-                    {saving ? 'Saving…' : isNew ? 'Save as new template' : 'Save changes'}
-                  </button>
-                </div>
               </div>
             </div>
           )}
-        </div>
-      </div>
 
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Preview</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Sample product data, your real store name — this is what this template renders.</p>
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <p className="text-xs font-semibold text-slate-500">Preview</p>
+              <button onClick={() => setFullView(v => !v)} className="text-xs text-brand-600 hover:text-brand-700 font-medium">
+                {fullView ? 'Split view' : 'Full view'}
+              </button>
+            </div>
+            <div className="border border-slate-200 rounded-lg p-3 bg-white overflow-auto" style={{ height: 320 }} dangerouslySetInnerHTML={{ __html: previewHtml }} />
+          </div>
         </div>
-        <div className="card-body">
-          <div className="border border-slate-200 rounded-lg p-4 bg-white overflow-x-auto" dangerouslySetInnerHTML={{ __html: previewHtml }} />
+
+        <div>
+          <p className="text-xs font-semibold text-slate-500 mb-1.5">Variables you can use:</p>
+          <ul className="text-xs text-slate-500 space-y-1">
+            {variables.map(v => (
+              <li key={v.name}><code className="font-mono text-slate-700 bg-slate-100 px-1 rounded">{v.name}</code> — {v.desc}</li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="flex items-center gap-3 pt-1">
+          <button className="btn-primary" onClick={() => void saveTemplate()} disabled={saving || loading}>
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {saving ? 'Saving…' : isNew ? 'Save as new template' : 'Save'}
+          </button>
+          <button className="text-sm text-brand-600 hover:text-brand-700 font-medium" onClick={() => void copyToAllStores()} disabled={copying || connectedStores.length < 2}>
+            {copying ? 'Copying…' : 'Copy to all stores'}
+          </button>
         </div>
       </div>
 
@@ -1389,13 +1429,6 @@ function ListingTemplateSection() {
     </div>
   )
 }
-
-const MESSAGE_TRIGGERS = [
-  { id: 'order_placed', label: 'Order placed', icon: Package },
-  { id: 'order_shipped', label: 'Order shipped', icon: Truck },
-  { id: 'delivered', label: 'Delivered', icon: CheckCircle2 },
-  { id: 'feedback_request', label: 'Feedback request', icon: Star },
-]
 
 function MessagesSection() {
   const { stores } = useStoreData()
