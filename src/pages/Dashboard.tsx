@@ -199,8 +199,11 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Store performance — scoped to the currently active store */}
-      {activeStore && (
+      {/* Store performance — scoped to the currently active store. Hidden with only one store
+          connected, since it would just repeat the totals above with different labels; it
+          appears on its own once a second store is connected, when a per-store breakdown
+          actually says something the totals don't. */}
+      {activeStore && connectedStores > 1 && (
         <div className="card">
           <div className="card-header">
             <h3 className="font-semibold text-slate-900">Store performance — {activeStore.ebayUsername || activeStore.nickname}</h3>
