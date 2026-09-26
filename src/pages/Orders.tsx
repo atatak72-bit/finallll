@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, Package, Loader2 } from 'lucide-react'
 import { OrderStatusBadge } from '../components/Badges'
@@ -23,9 +23,16 @@ function NotesCell({ orderId, initialNotes, onSave }: { orderId: string; initial
 }
 
 export default function Orders() {
-  const { orders, loading, updateOrderNotes } = useStoreData()
+  const { orders, loading, updateOrderNotes, refresh } = useStoreData()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
+
+  // Refetch whenever this page is landed on (e.g. coming back from List Items) instead of only
+  // showing whatever was already in memory from the app's initial load.
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const filtered = useMemo(() => {
     return orders.filter(o => {
