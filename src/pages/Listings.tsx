@@ -224,6 +224,15 @@ export default function Listings() {
   const [syncingFromEbay, setSyncingFromEbay] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
 
+  // Data is otherwise only fetched once, when the app first loads — so navigating away to
+  // another page (e.g. List Items) and back here showed whatever was already in memory,
+  // not what actually changed on eBay/the database in the meantime. Re-fetching every time
+  // this page is landed on keeps it current without needing a full browser refresh.
+  useEffect(() => {
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Each store's own saved eBay Fees (Settings → Profit & fees) — keyed by store_id, loaded
   // once for every store that appears in the current listings, so the net-profit % shown per
   // row always uses that row's OWN store's real fee settings rather than one hardcoded number.
