@@ -972,34 +972,55 @@ function VeroSection() {
   const connectedStores = stores.filter(s => s.connected)
   const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
 
-  const [keywords, setKeywords] = useState<string[]>([])
-  const [newKeyword, setNewKeyword] = useState('')
+  const [removeKeywords, setRemoveKeywords] = useState<string[]>([])
+  const [blockKeywords, setBlockKeywords] = useState<string[]>([])
+  const [blockAsins, setBlockAsins] = useState<string[]>([])
+  const [blockInBrand, setBlockInBrand] = useState(true)
+  const [blockInTitle, setBlockInTitle] = useState(true)
+  const [blockInDescription, setBlockInDescription] = useState(true)
+  const [autoRemoveBrand, setAutoRemoveBrand] = useState(true)
+  const [autoReplaceBrand, setAutoReplaceBrand] = useState(true)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const [copying, setCopying] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
     let cancelled = false
     setLoading(true)
+    setMessage(null)
     async function load() {
-      const { data } = await supabase.from('store_vero_settings').select('block_keywords').eq('store_id', activeStore!.id).maybeSingle()
+      const { data, error } = await supabase.from('store_vero_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
       if (cancelled) return
-      setKeywords((data?.block_keywords as string[]) || [])
+      if (error) setMessage({ type: 'error', text: `Failed to load: ${error.message}` })
+      setRemoveKeywords((data?.remove_keywords as string[]) || [])
+      setBlockKeywords((data?.block_keywords as string[]) || [])
+      setBlockAsins((data?.block_asins as string[]) || [])
+      setBlockInBrand(data?.block_in_brand ?? true)
+      setBlockInTitle(data?.block_in_title ?? true)
+      setBlockInDescription(data?.block_in_description ?? true)
+      setAutoRemoveBrand(data?.auto_remove_brand ?? true)
+      setAutoReplaceBrand(data?.auto_replace_brand ?? true)
       setLoading(false)
     }
     void load()
     return () => { cancelled = true }
   }, [activeStore?.id])
 
-  function addKeyword() {
-    const trimmed = newKeyword.trim()
-    if (!trimmed || keywords.includes(trimmed)) return
-    setKeywords(prev => [...prev, trimmed])
-    setNewKeyword('')
-  }
-  function removeKeyword(kw: string) {
-    setKeywords(prev => prev.filter(k => k !== kw))
+  function buildPayload(storeId: string) {
+    return {
+      store_id: storeId,
+      remove_keywords: removeKeywords,
+      block_keywords: blockKeywords,
+      block_asins: blockAsins,
+      block_in_brand: blockInBrand,
+      block_in_title: blockInTitle,
+      block_in_description: blockInDescription,
+      auto_remove_brand: autoRemoveBrand,
+      auto_replace_brand: autoReplaceBrand,
+      updated_at: new Date().toISOString(),
+    }
   }
 
   async function save() {
@@ -1007,51 +1028,270 @@ function VeroSection() {
     setSaving(true)
     setMessage(null)
     try {
-      const { error } = await supabase.from('store_vero_settings').upsert({
-        store_id: activeStore.id,
-        block_keywords: keywords,
-      }, { onConflict: 'store_id' })
+      const { error } = await supabase.from('store_vero_settings').upsert(buildPayload(activeStore.id), { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage('VeRO keyword list saved.')
+      setMessage({ type: 'success', text: 'VeRO & words filter saved.' })
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to save')
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save' })
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function copyToAllStores() {
+    if (!activeStore?.id) return
+    const others = connectedStores.filter(s => s.id !== activeStore.id)
+    if (others.length === 0) {
+      setMessage({ type: 'error', text: 'No other connected stores to copy to.' })
+      return
+    }
+    setCopying(true)
+    setMessage(null)
+    try {
+      const { error } = await supabase.from('store_vero_settings').upsert(others.map(s => buildPayload(s.id)), { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage({ type: 'success', text: `Copied to ${others.length} other store${others.length === 1 ? '' : 's'}.` })
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to copy' })
+    } finally {
+      setCopying(false)
     }
   }
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
-    <div className="space-y-4">
-      <p className="text-xs text-slate-500">Products whose title, description, or specifics contain any of these words are blocked from listing. Amazon/AmazonBasics/Prime/Fulfilled-by-Amazon are always blocked, even if not listed here.</p>
-      <div className="flex flex-wrap gap-2">
-        {keywords.map(kw => (
-          <span key={kw} className="inline-flex items-center gap-1.5 rounded-full bg-red-50 border border-red-200 px-3 py-1 text-xs text-red-700">
-            {kw}
-            <button onClick={() => removeKeyword(kw)}><X className="h-3 w-3" /></button>
-          </span>
-        ))}
-        {keywords.length === 0 && <p className="text-xs text-slate-400">No custom blocked words yet.</p>}
-      </div>
-      <div className="flex gap-2">
-        <input
-          className="input flex-1"
-          value={newKeyword}
-          onChange={e => setNewKeyword(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') addKeyword() }}
-          placeholder="Add a word or brand to block"
+    <div className="space-y-6">
+      <div className="space-y-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Remove keywords</p>
+          <p className="text-xs text-slate-500">Remove specific keywords from item title &amp; description — doesn't block listing, just strips them.</p>
+        </div>
+        <VeroWordList
+          words={removeKeywords}
+          onChange={setRemoveKeywords}
+          placeholder="Add word"
+          searchPlaceholder="Search word"
+          hint="Separate words with new lines or commas (e.g. amazon,walmart,refund)"
         />
-        <button className="btn-secondary shrink-0" onClick={addKeyword}><Plus className="h-4 w-4" /> Add</button>
+        <div className="divide-y divide-slate-200 rounded-lg border border-slate-200">
+          <VeroCheck
+            checked={autoRemoveBrand}
+            onChange={setAutoRemoveBrand}
+            label="Auto-remove the brand name"
+            desc="Strips the source brand out of the title and description."
+          />
+          <VeroCheck
+            checked={autoReplaceBrand}
+            onChange={setAutoReplaceBrand}
+            label="Auto-replace the brand"
+            desc={'Lists the item with "Does not apply" as its brand instead.'}
+          />
+        </div>
       </div>
-      <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void save()} disabled={saving}>
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          {saving ? 'Saving…' : 'Save list'}
-        </button>
-        {message && <span className="text-sm text-success-600">{message}</span>}
+
+      <div className="space-y-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Block by keyword</p>
+          <p className="text-xs text-slate-500">Blocks items with these keywords during bulk listing / shows a warning in the auto-lister</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <VeroPill checked={blockInBrand} onChange={setBlockInBrand} label="In the brand" />
+          <VeroPill checked={blockInTitle} onChange={setBlockInTitle} label="In the title" />
+          <VeroPill checked={blockInDescription} onChange={setBlockInDescription} label="In the description" />
+        </div>
+        <VeroWordList
+          words={blockKeywords}
+          onChange={setBlockKeywords}
+          placeholder="Add word"
+          searchPlaceholder="Search word"
+          hint="Separate words with new lines or commas (e.g. patent,trademark,replica)"
+        />
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Block by ASIN</p>
+          <p className="text-xs text-slate-500">Blocks these specific Amazon products outright, regardless of title/description matches.</p>
+        </div>
+        <VeroWordList
+          words={blockAsins}
+          onChange={setBlockAsins}
+          placeholder="Add ASIN"
+          searchPlaceholder="Search ASIN"
+          hint="Separate ASINs with new lines or commas"
+          normalize={w => w.trim().toUpperCase()}
+        />
+      </div>
+
+      <div className="space-y-2">
+        <p className="text-xs text-slate-500">Saves all three word lists above, plus the two brand options.</p>
+        <div className="flex flex-wrap items-center gap-4">
+          <button className="btn-primary" onClick={() => void save()} disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button
+            className="text-sm font-medium text-brand-600 underline hover:text-brand-700 disabled:opacity-50"
+            onClick={() => void copyToAllStores()}
+            disabled={copying || connectedStores.length < 2}
+          >
+            {copying ? 'Copying…' : 'Copy to all stores'}
+          </button>
+          {message && (
+            <span className={cn('text-sm', message.type === 'success' ? 'text-success-600' : 'text-error-600')}>{message.text}</span>
+          )}
+        </div>
       </div>
     </div>
+  )
+}
+
+function VeroWordList({
+  words,
+  onChange,
+  placeholder,
+  searchPlaceholder,
+  hint,
+  normalize = (w: string) => w.trim(),
+}: {
+  words: string[]
+  onChange: (next: string[]) => void
+  placeholder: string
+  searchPlaceholder: string
+  hint: string
+  normalize?: (w: string) => string
+}) {
+  const [input, setInput] = useState('')
+  const [search, setSearch] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  function addWords() {
+    const parts = input.split(/[\n,]+/).map(normalize).filter(Boolean)
+    if (parts.length === 0) return
+    const seen = new Set(words.map(w => w.toLowerCase()))
+    const next = [...words]
+    for (const part of parts) {
+      const key = part.toLowerCase()
+      if (!seen.has(key)) {
+        seen.add(key)
+        next.push(part)
+      }
+    }
+    onChange(next)
+    setInput('')
+  }
+
+  function removeWord(word: string) {
+    onChange(words.filter(w => w !== word))
+  }
+
+  async function copyAll() {
+    if (words.length === 0) return
+    try {
+      await navigator.clipboard.writeText(words.join(', '))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // clipboard not available — ignore
+    }
+  }
+
+  function clearAll() {
+    if (words.length === 0) return
+    if (!window.confirm('Remove all words from this list?')) return
+    onChange([])
+  }
+
+  const q = search.trim().toLowerCase()
+  const visible = q ? words.filter(w => w.toLowerCase().includes(q)) : words
+  const smallBtn = 'rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50'
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <textarea
+          className="input flex-1 resize-none"
+          rows={1}
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              addWords()
+            }
+          }}
+          placeholder={placeholder}
+        />
+        <button className="btn-secondary shrink-0" onClick={addWords}>Add</button>
+        <div className="relative flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+          <input
+            className="input w-full pl-8"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder={searchPlaceholder}
+          />
+        </div>
+      </div>
+      <p className="text-xs text-slate-500">{hint}</p>
+      <div className="flex min-h-[52px] max-h-[130px] flex-wrap content-start gap-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-2">
+        {visible.map(word => (
+          <span key={word} className="inline-flex h-fit items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-0.5 font-mono text-xs text-slate-700">
+            {word}
+            <button onClick={() => removeWord(word)} className="text-slate-400 hover:text-error-600" title="Remove">
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        ))}
+        {q && visible.length === 0 && <p className="text-xs text-slate-400">No match.</p>}
+      </div>
+      <div className="flex items-center justify-between">
+        <div className="flex gap-2">
+          <button className={smallBtn} onClick={() => void copyAll()}>{copied ? 'Copied!' : 'Copy to clipboard'}</button>
+          <button className={smallBtn} onClick={clearAll}>Clear</button>
+        </div>
+        <p className="text-xs text-slate-500">Total: {words.length} words</p>
+      </div>
+    </div>
+  )
+}
+
+function VeroCheck({ checked, onChange, label, desc }: { checked: boolean; onChange: (v: boolean) => void; label: string; desc: string }) {
+  return (
+    <button type="button" onClick={() => onChange(!checked)} className="flex w-full items-start gap-3 px-4 py-3 text-left">
+      <span className={cn(
+        'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+        checked ? 'border-success-600 bg-success-600 text-white' : 'border-slate-300 bg-white',
+      )}>
+        {checked && <Check className="h-3 w-3" />}
+      </span>
+      <span>
+        <span className="block text-sm font-medium text-slate-900">{label}</span>
+        <span className="block text-xs text-slate-500">{desc}</span>
+      </span>
+    </button>
+  )
+}
+
+function VeroPill({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={cn(
+        'inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium',
+        checked ? 'border-success-300 bg-success-50 text-slate-700' : 'border-slate-200 bg-white text-slate-500',
+      )}
+    >
+      <span className={cn(
+        'flex h-4 w-4 items-center justify-center rounded border',
+        checked ? 'border-success-600 bg-success-600 text-white' : 'border-slate-300 bg-white',
+      )}>
+        {checked && <Check className="h-3 w-3" />}
+      </span>
+      {label}
+    </button>
   )
 }
 
