@@ -1,12 +1,12 @@
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import { useState } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
 import {
-  ArrowLeft, Save, Trash2, Image as ImageIcon,
+  ArrowLeft, Save, Trash2,
   Plus, X, ExternalLink, Sparkles, Loader2, AlertCircle,
 } from 'lucide-react'
 import { useStoreData } from '../lib/DataContext'
 import { EmptyState } from '../components/UI'
-import { formatCurrency, cn } from '../lib/utils'
+import { formatCurrency } from '../lib/utils'
 
 export default function EditListing() {
   const { id } = useParams()
@@ -23,12 +23,27 @@ export default function EditListing() {
   const [price, setPrice] = useState(listing ? String(listing.ebayPrice) : '')
   const [quantity, setQuantity] = useState(listing ? String(listing.quantity) : '')
   const [description, setDescription] = useState('')
+  const [loadedId, setLoadedId] = useState<string | null>(listing ? listing.id : null)
   const [saving, setSaving] = useState(false)
   const [ending, setEnding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
   const activeStore = stores.find(s => s.active) || stores[0]
+
+  // FIX: listings are loaded asynchronously. When this page is opened directly (or the data
+  // arrives a moment after the page renders), the fields above were initialised while
+  // `listing` was still undefined and stayed empty forever. Fill them in once, as soon as the
+  // listing becomes available — and only once per listing, so it never overwrites what the
+  // user is typing when the listings data refreshes in the background.
+  useEffect(() => {
+    if (listing && loadedId !== listing.id) {
+      setTitle(listing.title || '')
+      setPrice(String(listing.ebayPrice ?? ''))
+      setQuantity(String(listing.quantity ?? ''))
+      setLoadedId(listing.id)
+    }
+  }, [listing, loadedId])
 
   if (!listing) {
     return (
@@ -43,6 +58,8 @@ export default function EditListing() {
       </div>
     )
   }
+
+  const ebayUrl = listing.ebayId ? `https://www.ebay.com/itm/${listing.ebayId}` : ''
 
   const handleEndListing = async () => {
     if (!listing) return
@@ -60,15 +77,36 @@ export default function EditListing() {
 
   const handleSave = async () => {
     if (!activeStore) { setError('No connected store found.'); return }
+    if (loadedId !== listing.id) { setError('Listing details are still loading — please wait a moment and try again.'); return }
+
+    // FIX: only send what actually changed, and never send an empty/invalid value.
+    // Previously every save pushed title, price and quantity — even when the form was
+    // empty — which could overwrite the live eBay listing with blank or NaN values.
+    const trimmedTitle = title.trim()
+    const newPrice = parseFloat(price)
+    const newQuantity = parseInt(quantity, 10)
+
+    if (!trimmedTitle) { setError('Title cannot be empty.'); return }
+    if (trimmedTitle.length > 80) { setError('eBay titles can be at most 80 characters.'); return }
+    if (!Number.isFinite(newPrice) || newPrice <= 0) { setError('Enter a valid eBay price greater than 0.'); return }
+    if (!Number.isInteger(newQuantity) || newQuantity < 0) { setError('Enter a valid quantity (0 or more).'); return }
+
+    const changes: { sku: string; title?: string; price?: number; quantity?: number; description?: string } = {
+      sku: listing.asin || listing.ebayId,
+    }
+    if (trimmedTitle !== (listing.title || '').trim()) changes.title = trimmedTitle
+    if (Math.abs(newPrice - Number(listing.ebayPrice)) > 0.001) changes.price = newPrice
+    if (newQuantity !== Number(listing.quantity)) changes.quantity = newQuantity
+    if (description.trim()) changes.description = description
+
+    if (Object.keys(changes).length === 1) {
+      setError('Nothing changed — there is nothing to push to eBay.')
+      return
+    }
+
     setSaving(true); setError(null); setSuccess(false)
     try {
-      await updateListing(activeStore.id, {
-        sku: listing.asin || listing.ebayId,
-        title,
-        price: parseFloat(price),
-        quantity: parseInt(quantity, 10),
-        description: description || undefined,
-      })
+      await updateListing(activeStore.id, changes)
       setSuccess(true)
       setTimeout(() => navigate(-1), 1200)
     } catch (err) {
@@ -105,9 +143,11 @@ export default function EditListing() {
             <div className="flex items-center gap-2 mb-2">
               <span className="badge-neutral">eBay ID: {listing.ebayId}</span>
               <span className="badge-neutral">ASIN: {listing.asin}</span>
-              <a href="#" className="text-xs text-brand-600 hover:text-brand-700 flex items-center gap-1">
-                View on eBay <ExternalLink className="w-3 h-3" />
-              </a>
+              {ebayUrl && (
+                <a href={ebayUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-600 hover:text-brand-700 flex items-center gap-1">
+                  View on eBay <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
             </div>
             <h3 className="font-semibold text-slate-900">{listing.title}</h3>
           </div>
@@ -144,7 +184,7 @@ export default function EditListing() {
             <label className="label">Amazon Source Price</label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">$</span>
-              <input className="input pl-7" defaultValue={listing.amazonPrice} disabled />
+              <input className="input pl-7" value={String(listing.amazonPrice ?? '')} disabled readOnly />
             </div>
           </div>
           <div>
@@ -167,7 +207,7 @@ export default function EditListing() {
             className="input min-h-[150px] resize-y"
             value={description}
             onChange={e => setDescription(e.target.value)}
-            placeholder="Enter listing description..."
+            placeholder="Leave empty to keep the current eBay description unchanged."
           />
         </div>
       </div>
@@ -194,14 +234,11 @@ export default function EditListing() {
         <div className="card-header"><h3 className="font-semibold text-slate-900">Images</h3></div>
         <div className="card-body">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {[listing.image, listing.image, listing.image].map((img, i) => (
-              <div key={i} className="relative group">
-                <img src={img} alt="" className="w-full aspect-square rounded-lg object-cover border border-slate-200" />
-                <button className="absolute top-1 right-1 p-1 bg-white/80 rounded-lg opacity-0 group-hover:opacity-100 transition text-error-500 hover:bg-error-50">
-                  <X className="w-3.5 h-3.5" />
-                </button>
+            {listing.image && (
+              <div className="relative group">
+                <img src={listing.image} alt="" className="w-full aspect-square rounded-lg object-cover border border-slate-200" />
               </div>
-            ))}
+            )}
             <button className="aspect-square rounded-lg border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 hover:border-brand-400 hover:text-brand-500 transition">
               <Plus className="w-6 h-6" />
               <span className="text-xs mt-1">Add Image</span>
