@@ -11,6 +11,7 @@ import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
 import type { AmazonProduct } from '../lib/useData'
 import type { BulkRun, BulkRunItem } from '../lib/useData'
+import { isBlockedBulkError } from '../lib/useData'
 
 type Tab = 'single' | 'bulk' | 'bulk-status' | 'drafts' | 'import'
 
@@ -234,14 +235,15 @@ interface CsvMatchRow {
 // derived purely for display from the error text of a 'failed' item (VeRO/Prime/FBA-only
 // rejections) — the underlying data model (BulkRunItem.status) is untouched, so this is a
 // display-only distinction and carries zero risk to the working publish/retry logic.
-const BLOCK_PATTERNS = /blocked by vero|blocked by your prime filter|not fulfilled by amazon|fba-only|not prime-eligible|filtered out/i
+// The rules for what counts as "Blocked" live in useData (isBlockedBulkError) so this screen
+// and Resume always agree: Prime/FBA, rating, VeRO, out-of-stock, duplicate and eBay policy blocks.
 
 type DetailTab = 'all' | 'success' | 'blocked' | 'failed' | 'pending'
 
 function classifyItem(item: BulkRunItem): DetailTab {
   if (item.status === 'success') return 'success'
   if (item.status === 'pending') return 'pending'
-  if (item.error && BLOCK_PATTERNS.test(item.error)) return 'blocked'
+  if (isBlockedBulkError(item.error)) return 'blocked'
   return 'failed'
 }
 
@@ -828,8 +830,8 @@ export default function ListItems() {
     }
   }
 
-  const parsedBulkItems = useMemo(() => {
-    return bulkText
+  const bulkParse = useMemo(() => {
+    const all = bulkText
       .split('\n')
       .map(line => line.trim())
       .filter(Boolean)
@@ -844,7 +846,17 @@ export default function ListItems() {
         return { asin: cleanAsin, customTitle: customTitle || undefined }
       })
       .filter(i => /^[A-Z0-9]{10}$/.test(i.asin))
+    // The same ASIN pasted twice would either be listed twice or fail as "already listed" —
+    // keep only its first occurrence (and its custom title, if that line had one).
+    const seen = new Set<string>()
+    const items = all.filter(i => {
+      if (seen.has(i.asin)) return false
+      seen.add(i.asin)
+      return true
+    })
+    return { items, duplicates: all.length - items.length }
   }, [bulkText])
+  const parsedBulkItems = bulkParse.items
 
   const bulkStore = stores.find(s => s.id === bulkStoreId) || activeStore
 
@@ -933,13 +945,35 @@ export default function ListItems() {
     setBulkError(null)
     setActiveRunIds(prev => prev.includes(runId) ? prev : [...prev, runId])
     try {
-      await processBulkRun(runId)
+      await processBulkRun(runId, { resume: true })
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to process bulk run')
     } finally {
       setActiveRunIds(prev => prev.filter(id => id !== runId))
     }
   }
+
+  const handleDeleteBulkRun = async (run: BulkRun) => {
+    if (activeRunIds.includes(run.id)) return
+    if (!window.confirm(`Delete the history of "${run.name}"? Listings that were already published stay live on eBay.`)) return
+    try {
+      await deleteBulkRun(run.id)
+    } catch (err) {
+      setBulkError(err instanceof Error ? err.message : 'Failed to delete bulk run')
+    }
+  }
+
+  // Bulk runs are processed by this browser tab. Warn before the tab is closed or reloaded
+  // while a batch is still running, so it isn't silently left half-finished.
+  useEffect(() => {
+    if (activeRunIds.length === 0) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [activeRunIds.length])
 
   const filteredRuns = useMemo(() => {
     if (statusFilter === 'all') return bulkRuns
@@ -1441,7 +1475,12 @@ export default function ListItems() {
                   onChange={e => setBulkText(e.target.value)}
                   placeholder={'B0ABCDE123\nB0FGHIJ456;Custom title for this one\nB0KLMNO789'}
                 />
-                <p className="mt-1 text-xs text-slate-400">{parsedBulkItems.length} valid ASIN{parsedBulkItems.length === 1 ? '' : 's'} detected</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  {parsedBulkItems.length} valid ASIN{parsedBulkItems.length === 1 ? '' : 's'} detected
+                  {bulkParse.duplicates > 0 && (
+                    <span className="text-amber-600"> · {bulkParse.duplicates} duplicate{bulkParse.duplicates === 1 ? '' : 's'} removed</span>
+                  )}
+                </p>
               </div>
 
               <div>
@@ -1537,6 +1576,9 @@ export default function ListItems() {
               </div>
               {bulkError && <div className="text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">{bulkError}</div>}
               <p className="text-xs text-slate-400">Each ASIN is fetched from Amazon, priced using your saved profit rules, checked against your VeRO list, and either published live or saved as a draft. Large batches take a while — track progress under "Bulk Status".</p>
+              <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Keep this browser tab open while a batch is running — batches are processed by this page. If the tab is closed, open Bulk Status later and press <span className="font-medium">Resume</span> to continue where it stopped.
+              </p>
             </div>
           </div>
         </div>
@@ -1616,7 +1658,12 @@ export default function ListItems() {
                                 {activeRunIds.includes(run.id) ? 'Processing…' : 'Resume'}
                               </button>
                             )}
-                            <button onClick={() => void deleteBulkRun(run.id)} className="text-slate-400 hover:text-red-500" title="Delete run">
+                            <button
+                              onClick={() => void handleDeleteBulkRun(run)}
+                              disabled={activeRunIds.includes(run.id)}
+                              className="text-slate-400 hover:text-red-500 disabled:opacity-30 disabled:cursor-not-allowed"
+                              title={activeRunIds.includes(run.id) ? 'Wait until this batch finishes' : 'Delete run history'}
+                            >
                               <Trash2 className="w-4 h-4 inline" />
                             </button>
                           </td>
