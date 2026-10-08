@@ -275,6 +275,23 @@ function findBlockedWord(text: string, words: string[]): string | null {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
+// eBay treats any listing that carries an "EPA Registration Number" item specific as a
+// pesticide and rejects it outside pesticide categories (errorId 25019). Drop that field unless
+// it holds a real registration number (e.g. AI filled it with "Does not apply").
+function withoutPlaceholderEpa(aspects: Record<string, string[]>): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const [name, values] of Object.entries(aspects)) {
+    if (/^epa registration n/i.test(name.trim())) {
+      const real = (values || []).filter(v => v && !/^(n\/?a|none|does not apply|not applicable|unknown)$/i.test(String(v).trim()))
+      if (real.length === 0) continue
+      out[name] = real
+      continue
+    }
+    out[name] = values
+  }
+  return out
+}
+
 function mapBulkRunRow(r: BulkRunRow, items: BulkRunItemRow[] = []): BulkRun {
   return {
     id: r.id,
@@ -711,7 +728,7 @@ export function useData(): DataContextValue {
             // (independent of the AI Titles toggle) without overwriting anything AI already
             // provided — many eBay categories require a Model value to publish at all, and
             // previously that only ever got filled in when AI Titles happened to be on.
-            aspects: sanitizeAspects({ ...extractBasicAspectsFromSpecs(product.specs), ...(aspects || {}) }),
+            aspects: sanitizeAspects(withoutPlaceholderEpa({ ...extractBasicAspectsFromSpecs(product.specs), ...(aspects || {}) })),
             amazonPrice: product.price,
           }
           // eBay's temporary errors (25001 "system error", 25604 "... not found" right after the
