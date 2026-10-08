@@ -143,13 +143,14 @@ export default function Topbar({ title, subtitle }: { title: string; subtitle?: 
     }
 
     for (const r of bulkRuns || []) {
-      if (!r.failed || now - timeOf(r.date) > 7 * DAY_MS) continue
+      const runDate = r.completedAt || r.createdAt
+      if (!r.failed || now - timeOf(runDate) > 7 * DAY_MS) continue
       items.push({
         id: `bulk-${r.id}`,
         icon: 'bulk',
         title: `${r.failed} item${r.failed === 1 ? '' : 's'} failed in a bulk run`,
         detail: r.name || 'Bulk run',
-        date: r.date,
+        date: runDate,
         to: '/list-items',
       })
     }
