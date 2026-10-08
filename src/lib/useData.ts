@@ -167,6 +167,17 @@ function mapListingRow(l: ListingRow): Listing {
   }
 }
 
+// eBay's Fulfillment API sends its own raw statuses (NOT_STARTED, IN_PROGRESS, FULFILLED),
+// while the rest of the app (Orders filter, Dashboard counts, badges) works with
+// pending / shipped / delivered / cancelled. Translate once here so every page agrees.
+function normalizeOrderStatus(raw: string | null | undefined): Order['status'] {
+  const s = String(raw || '').trim().toLowerCase()
+  if (s === 'shipped' || s === 'delivered' || s === 'cancelled' || s === 'pending') return s
+  if (s === 'fulfilled') return 'shipped'
+  if (s === 'canceled' || s.includes('cancel')) return 'cancelled'
+  return 'pending' // not_started, in_progress, empty, or anything unknown still needs shipping
+}
+
 function mapOrderRow(o: OrderRow): Order {
   return {
     id: o.id,
@@ -183,7 +194,7 @@ function mapOrderRow(o: OrderRow): Order {
     amazonCost: Number(o.amazon_cost) || 0,
     orderEarnings: Number((o as unknown as { order_earnings?: number | null }).order_earnings) || 0,
     profit: Number(o.profit) || 0,
-    status: (o.status as Order['status']) || 'pending',
+    status: normalizeOrderStatus(o.status),
     orderDate: o.order_date || new Date().toISOString(),
     shipToName: o.ship_to_name || '',
     shipToStreet: o.ship_to_street || '',
