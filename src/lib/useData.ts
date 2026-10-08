@@ -253,8 +253,11 @@ export function isBlockedBulkError(error: string | null | undefined): boolean {
 // "Availability/Offer not found" timing issue right after creating an item, network blips).
 // Real data problems (25002 missing item specifics, 25019 policy blocks) are NOT retried.
 function isTransientPublishError(message: string): boolean {
+  // eBay sometimes wraps its own outage in 25002 ("A user error has occurred. System error.
+  // Unable to process your request. Please try again later.") — that one IS temporary.
+  if (/system error|try again later/i.test(message)) return true
   if (/errorId":(25002|25019)/.test(message)) return false
-  return /errorId":(25001|25604)|system error|internal server error|not found\.|failed to fetch|networkerror|unexpected end of json/i.test(message)
+  return /errorId":(25001|25604)|internal server error|not found\.|failed to fetch|networkerror|unexpected end of json/i.test(message)
 }
 
 // Whole-word, case-insensitive keyword match ("Anua" must not match "January", "Active" must
