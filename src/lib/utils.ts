@@ -149,8 +149,14 @@ const FALLBACK_ASPECT_SPEC_KEYS: Record<string, string[]> = {
   Type: ["type", "style"],
   "Compatible Brand": ["compatible brand", "compatible make", "fits brand", "compatible with"],
   "Compatible Model": ["compatible model", "compatible models", "fits model", "for model"],
-  "EPA Registration Number": ["epa registration number", "epa reg no", "epa reg. no.", "epa registration no"],
 }
+
+// EPA Registration Number is deliberately NOT in the "Does not apply" fallback list above.
+// eBay treats ANY listing that carries this item specific as a pesticide, and rejects it
+// outside the pesticide categories (errorId 25019, "PI_FnP_EPA_Seller_Tag_outside_cat") —
+// sending "Does not apply" on every listing made eBay reject every bulk publish. It is now
+// only sent when Amazon's spec table actually contains a real EPA number for the product.
+const EPA_SPEC_KEYS = ["epa registration number", "epa reg no", "epa reg. no.", "epa registration no"]
 
 export function extractBasicAspectsFromSpecs(specs?: Record<string, string | number> | null): Record<string, string[]> {
   const out: Record<string, string[]> = {}
@@ -173,6 +179,19 @@ export function extractBasicAspectsFromSpecs(specs?: Record<string, string | num
     }
     out[ebayField] = [value || "Does not apply"]
   }
+
+  for (const wanted of EPA_SPEC_KEYS) {
+    const hit = entries.find(([k]) => k === wanted)
+    if (hit && hit[1] && !/^(n\/?a|none|does not apply|not applicable)$/i.test(hit[1])) {
+      out["EPA Registration Number"] = [hit[1]]
+      break
+    }
+  }
+
+  // Brand is required by many eBay categories (errorId 25002 "The item specific Brand is
+  // missing"). Same store-wide convention as everywhere else: "Does not apply" unless a value
+  // was already set — AI-generated aspects, merged on top of these by the caller, still win.
+  if (!out.Brand) out.Brand = ["Does not apply"]
 
   return out
 }
