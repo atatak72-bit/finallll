@@ -123,10 +123,10 @@ export interface DataContextValue {
   disconnectStore: (storeId: string) => Promise<void>
   updateListing: (storeId: string, payload: UpdateListingPayload) => Promise<void>
   publishListing: (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean }) => Promise<string>
-  fetchAmazonProduct: (input: string, storeId?: string) => Promise<AmazonProduct>
+  fetchAmazonProduct: (input: string, storeId?: string, opts?: { allowVero?: boolean }) => Promise<AmazonProduct>
   bulkRuns: BulkRun[]
   createBulkRun: (input: CreateBulkRunInput) => Promise<BulkRun>
-  processBulkRun: (runId: string) => Promise<void>
+  processBulkRun: (runId: string, opts?: { resume?: boolean }) => Promise<void>
   deleteBulkRun: (runId: string) => Promise<void>
   linkExistingListings: (storeId: string, pairs: Array<{ ebayId: string; asin: string }>) => Promise<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> }>
   endListing: (storeId: string, listingId: string, sku?: string, opts?: { skipRefresh?: boolean }) => Promise<void>
@@ -237,6 +237,43 @@ function mapRevisionRow(r: RevisionRow): Revision {
     date: r.date,
   }
 }
+
+// ---- Bulk helpers ----
+// Errors that mean "a rule worked as intended" (VeRO, Prime/FBA, rating, stock, duplicate,
+// eBay policy blocks) rather than a technical failure. Shared by the Bulk Status screen (to put
+// these under "Blocked") and by Resume (which no longer re-fetches items that will only be
+// blocked again — that just burned proxy/VPS time).
+const BLOCKED_ERROR_PATTERN = /blocked by vero|filtered out|not fulfilled by amazon|fba-only|not prime|prime only|prime filter|not prime-eligible|out of stock|already listed|allow duplicate|errorId":25019|improper words|violation of ebay policy|not permitted to be listed/i
+
+export function isBlockedBulkError(error: string | null | undefined): boolean {
+  return !!error && BLOCKED_ERROR_PATTERN.test(error)
+}
+
+// eBay-side hiccups that usually succeed on a second try (eBay's own "system error", the
+// "Availability/Offer not found" timing issue right after creating an item, network blips).
+// Real data problems (25002 missing item specifics, 25019 policy blocks) are NOT retried.
+function isTransientPublishError(message: string): boolean {
+  if (/errorId":(25002|25019)/.test(message)) return false
+  return /errorId":(25001|25604)|system error|internal server error|not found\.|failed to fetch|networkerror|unexpected end of json/i.test(message)
+}
+
+// Whole-word, case-insensitive keyword match ("Anua" must not match "January", "Active" must
+// not match "Inactive") — the same rule amazon-fetch uses on the server.
+function findBlockedWord(text: string, words: string[]): string | null {
+  for (const raw of words) {
+    const w = (raw || '').trim()
+    if (!w) continue
+    const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    try {
+      if (new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(text)) return w
+    } catch {
+      if (text.toLowerCase().includes(w.toLowerCase())) return w
+    }
+  }
+  return null
+}
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 function mapBulkRunRow(r: BulkRunRow, items: BulkRunItemRow[] = []): BulkRun {
   return {
@@ -404,14 +441,14 @@ export function useData(): DataContextValue {
     await refresh()
   }, [refresh])
 
-  const fetchAmazonProduct = useCallback(async (input: string, storeId?: string): Promise<AmazonProduct> => {
+  const fetchAmazonProduct = useCallback(async (input: string, storeId?: string, opts?: { allowVero?: boolean }): Promise<AmazonProduct> => {
     const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/amazon-fetch`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ asin: input, store_id: storeId }),
+      body: JSON.stringify({ asin: input, store_id: storeId, ...(opts?.allowVero ? { allow_vero: true } : {}) }),
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; product?: AmazonProduct; error?: string }
     if (!res.ok || !data.success || !data.product) {
@@ -488,15 +525,22 @@ export function useData(): DataContextValue {
     return newRun
   }, [])
 
-  const processBulkRun = useCallback(async (runId: string): Promise<void> => {
+  const processBulkRun = useCallback(async (runId: string, opts?: { resume?: boolean }): Promise<void> => {
     const { data: runRow } = await supabase.from('bulk_runs').select('*').eq('id', runId).single()
     if (!runRow) throw new Error('Bulk run not found')
     const run = runRow as BulkRunRow
 
+    // Resume safety: a batch that was updated in the last few minutes is most likely still being
+    // processed (in this tab after a refresh, or in another tab/device). Processing it twice at
+    // the same time could publish the same ASIN twice, so refuse instead.
+    if (opts?.resume && run.status === 'running' && Date.now() - new Date(run.updated_at).getTime() < 3 * 60 * 1000) {
+      throw new Error('This batch is still being processed (maybe in another tab). Wait a few minutes, then press Resume again.')
+    }
+
     const { data: itemRows } = await supabase.from('bulk_run_items').select('*').eq('run_id', runId).order('created_at', { ascending: true })
     const items = (itemRows || []) as BulkRunItemRow[]
 
-    let blockKeywords: string[] = ['amazon', 'amazon basics', 'amazonbasics', 'prime', 'fulfilled by amazon']
+    let blockKeywords: string[] = ['amazon', 'amazon basics', 'amazonbasics', 'fulfilled by amazon']
     if (!run.allow_vero) {
       const { data: veroSettings } = await supabase
         .from('store_vero_settings')
@@ -559,9 +603,10 @@ export function useData(): DataContextValue {
       let processedStatus: BulkRunItem['status'] = 'failed'
       let processedTitle: string | null = item.title
       let processedImage: string | null = item.image
+      let processedError: string | null = null
 
       try {
-        const product = await fetchAmazonProduct(item.asin, run.store_id)
+        const product = await fetchAmazonProduct(item.asin, run.store_id, { allowVero: !!run.allow_vero })
         // eBay item titles are capped at 80 characters — the bulk pipeline previously sent
         // the raw, often much longer, Amazon title straight through unlike the Single tab
         // (which already truncates). Apply the same word-safe cap here for both a custom
@@ -575,12 +620,19 @@ export function useData(): DataContextValue {
           : (product.suggestedPrice || rawAmazonPrice)
         const quantity = product.stock.toLowerCase().includes('out') ? 0 : (product.defaultQuantity || 1)
         const image = product.mainImage || product.images[0] || ''
+        processedTitle = title
+        processedImage = image
         // AI Titles: only regenerate the title when the person didn't set a custom one for
         // this item — a custom title is an explicit override and should win either way.
         // Also sends the store's ID (so the function can pull an eBay access token and look
         // up that product's real category + official item-specifics list) and the raw Amazon
         // specs, so the AI fills fields with real data instead of guessing from just the title.
         let aiDescription: string | undefined
+        // Check the VeRO list BEFORE spending an AI credit on an item that will be blocked anyway.
+        if (!run.allow_vero) {
+          const earlyHit = findBlockedWord(title, blockKeywords)
+          if (earlyHit) throw new Error(`Blocked by VeRO filter (matched "${earlyHit}")`)
+        }
         if (run.ai_titles && !item.custom_title) {
           try {
             const { data: aiData } = await supabase.functions.invoke('ai-generate-content', {
@@ -620,8 +672,7 @@ export function useData(): DataContextValue {
         processedImage = image
 
         if (!run.allow_vero) {
-          const titleLower = title.toLowerCase()
-          const hit = blockKeywords.find(kw => kw && titleLower.includes(kw.toLowerCase()))
+          const hit = findBlockedWord(title, blockKeywords)
           if (hit) {
             throw new Error(`Blocked by VeRO filter (matched "${hit}")`)
           }
@@ -642,7 +693,7 @@ export function useData(): DataContextValue {
           })
           if (draftErr) throw new Error(draftErr.message)
         } else {
-          const ebayListingId = await publishListing(run.store_id, {
+          const publishPayload: PublishListingPayload = {
             sku: product.asin,
             title,
             price,
@@ -662,7 +713,21 @@ export function useData(): DataContextValue {
             // previously that only ever got filled in when AI Titles happened to be on.
             aspects: sanitizeAspects({ ...extractBasicAspectsFromSpecs(product.specs), ...(aspects || {}) }),
             amazonPrice: product.price,
-          }, { skipRefresh: true })
+          }
+          // eBay's temporary errors (25001 "system error", 25604 "... not found" right after the
+          // item is created) usually clear within seconds. Retry those up to 2 more times; the
+          // publish route reuses the offer it already created, so a retry never duplicates it.
+          let ebayListingId = ''
+          for (let attempt = 1; ; attempt++) {
+            try {
+              ebayListingId = await publishListing(run.store_id, publishPayload, { skipRefresh: true })
+              break
+            } catch (publishErr) {
+              const msg = publishErr instanceof Error ? publishErr.message : String(publishErr)
+              if (attempt >= 3 || !isTransientPublishError(msg)) throw publishErr
+              await sleep(attempt * 4000)
+            }
+          }
 
           // Promoted Listings: best-effort — eBay eligibility (sales history, category, etc.)
           // can reject this even when the call itself succeeds, so failures here never fail the item.
@@ -689,9 +754,13 @@ export function useData(): DataContextValue {
         processedStatus = 'success'
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : 'Unknown error'
+        processedError = errorMsg
         await supabase.from('bulk_run_items').update({
           status: 'failed',
           error: errorMsg,
+          // Keep whatever we learned about the product so a failed row isn't just "—".
+          ...(processedTitle ? { title: processedTitle } : {}),
+          ...(processedImage ? { image: processedImage } : {}),
         }).eq('id', item.id)
         failed++
       }
@@ -704,7 +773,7 @@ export function useData(): DataContextValue {
 
       setBulkRuns(prev => prev.map(r =>
         r.id === runId
-          ? { ...r, succeeded, failed, items: r.items.map(i => i.id === item.id ? { ...i, status: processedStatus, title: processedTitle, image: processedImage } : i) }
+          ? { ...r, succeeded, failed, items: r.items.map(i => i.id === item.id ? { ...i, status: processedStatus, title: processedTitle, image: processedImage, error: processedError } : i) }
           : r
       ))
     }
@@ -714,7 +783,11 @@ export function useData(): DataContextValue {
     // ('failed') ones — the old behavior of only picking up 'pending' items meant Resume did
     // nothing for a batch that had already failed once, even after the actual bug causing the
     // failures (a description/aspect validation issue, say) had been fixed in the meantime.
-    const toRetry = items.filter(i => i.status === 'pending' || i.status === 'failed')
+    // Items that were blocked by a rule (VeRO, Prime, rating, duplicate…) are left as they are —
+    // retrying them only re-fetches Amazon to get blocked again. They still count as failed.
+    const blockedCount = items.filter(i => i.status === 'failed' && isBlockedBulkError(i.error)).length
+    failed = blockedCount
+    const toRetry = items.filter(i => i.status === 'pending' || (i.status === 'failed' && !isBlockedBulkError(i.error)))
     let cursor = 0
     const worker = async () => {
       while (cursor < toRetry.length) {
