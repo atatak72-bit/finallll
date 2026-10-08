@@ -219,16 +219,6 @@ function parseCsv(text: string): string[][] {
   return rows.filter(r => r.some(c => c.trim() !== ''))
 }
 
-interface CsvMatchRow {
-  ebayId: string
-  ebayTitle: string
-  status: 'pending' | 'searching' | 'found' | 'not_found' | 'error'
-  matchAsin: string
-  matchTitle: string
-  matchImage: string
-  include: boolean
-}
-
 // ---- Bulk run detail modal ----
 // Opened by clicking a batch row in Bulk Status. Shows every item in that run with its real
 // outcome, split into tabs (All / Success / Blocked / Failed / In progress). "Blocked" is
@@ -473,7 +463,7 @@ function BulkRunDetailModal({
 }
 
 export default function ListItems() {
-  const { stores, listings, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings } = useStoreData()
+  const { stores, listings, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun } = useStoreData()
   const [tab, setTab] = useState<Tab>('single')
   const [asin, setAsin] = useState('')
   const [product, setProduct] = useState<AmazonProduct | null>(null)
@@ -530,22 +520,6 @@ export default function ListItems() {
   // Which batch's detail modal is open (Bulk Status → click a row). Purely a UI-selection
   // state — doesn't touch bulkRuns data itself.
   const [openRunId, setOpenRunId] = useState<string | null>(null)
-
-  const [importText, setImportText] = useState('')
-  const [importRunning, setImportRunning] = useState(false)
-  const [importResult, setImportResult] = useState<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> } | null>(null)
-  const [importError, setImportError] = useState<string | null>(null)
-  const [manualFileName, setManualFileName] = useState<string | null>(null)
-  const [showManualUpload, setShowManualUpload] = useState(false)
-  const manualFileInputRef = useRef<HTMLInputElement>(null)
-
-  const [importMode, setImportMode] = useState<'manual' | 'csv'>('csv')
-  const [csvRows, setCsvRows] = useState<CsvMatchRow[]>([])
-  const [csvParseError, setCsvParseError] = useState<string | null>(null)
-  const [csvSearching, setCsvSearching] = useState(false)
-  const [csvSearchProgress, setCsvSearchProgress] = useState(0)
-  const [csvLinking, setCsvLinking] = useState(false)
-  const [csvLinkResult, setCsvLinkResult] = useState<{ linked: number; failed: Array<{ ebayId: string; asin: string; error: string }> } | null>(null)
 
   const [draftListings, setDraftListings] = useState<Array<{ id: string; title: string; image: string | null; ebay_price: number; asin: string | null; quantity: number }>>([])
   const [draftsLoading, setDraftsLoading] = useState(false)
@@ -1041,149 +1015,6 @@ export default function ListItems() {
   const handleDeleteDraft = async (draftId: string) => {
     await supabase.from('listings').delete().eq('id', draftId)
     setDraftListings(prev => prev.filter(d => d.id !== draftId))
-  }
-
-  const parsedImportPairs = useMemo(() => {
-    return importText
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean)
-      .map(line => {
-        const [ebayId, asin] = line.split(',').map(s => s.trim())
-        return { ebayId, asin }
-      })
-      .filter(p => p.ebayId && p.asin)
-  }, [importText])
-
-  const handleImportSubmit = async () => {
-    if (!activeStore || parsedImportPairs.length === 0) return
-    setImportRunning(true)
-    setImportError(null)
-    setImportResult(null)
-    try {
-      const result = await linkExistingListings(activeStore.id, parsedImportPairs)
-      setImportResult(result)
-      if (result.failed.length === 0) setImportText('')
-    } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Import failed')
-    } finally {
-      setImportRunning(false)
-    }
-  }
-
-  const handleImportFile = (file: File) => {
-    setManualFileName(file.name)
-    const reader = new FileReader()
-    reader.onload = () => setImportText(String(reader.result || ''))
-    reader.readAsText(file)
-  }
-
-  const handleCsvFile = (file: File) => {
-    setCsvParseError(null)
-    setCsvLinkResult(null)
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        const text = String(reader.result || '')
-        const rows = parseCsv(text)
-        if (rows.length < 2) {
-          setCsvParseError('The file appears to be empty or has no data rows.')
-          return
-        }
-        const header = rows[0].map(h => h.trim().toLowerCase())
-        const idIdx = header.findIndex(h => h === 'item number' || h === 'item id' || h === 'custom label (sku)')
-        const titleIdx = header.findIndex(h => h === 'title')
-        if (idIdx === -1 || titleIdx === -1) {
-          setCsvParseError('Could not find "Item number" and "Title" columns in this CSV. Make sure it\'s an unmodified eBay "All active listings" export.')
-          return
-        }
-        const dataRows = rows.slice(1)
-          .map(r => ({ ebayId: (r[idIdx] || '').trim(), ebayTitle: (r[titleIdx] || '').trim() }))
-          .filter(r => r.ebayId && r.ebayTitle)
-        const mapped: CsvMatchRow[] = dataRows.map(r => ({
-          ebayId: r.ebayId,
-          ebayTitle: r.ebayTitle,
-          status: 'pending',
-          matchAsin: '',
-          matchTitle: '',
-          matchImage: '',
-          include: true,
-        }))
-        setCsvRows(mapped)
-      } catch {
-        setCsvParseError('Failed to read this file. Make sure it\'s a valid CSV.')
-      }
-    }
-    reader.readAsText(file)
-  }
-
-  const handleFindAsins = async () => {
-    if (csvRows.length === 0) return
-    setCsvSearching(true)
-    setCsvSearchProgress(0)
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-
-    for (let i = 0; i < csvRows.length; i++) {
-      setCsvRows(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'searching' } : r))
-      try {
-        const res = await fetch(`${supabaseUrl}/functions/v1/amazon-search`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-          body: JSON.stringify({ title: csvRows[i].ebayTitle }),
-        })
-        const data = await res.json().catch(() => ({})) as { success?: boolean; matches?: Array<{ asin: string; title: string; image: string }> }
-        const top = data.matches?.[0]
-        setCsvRows(prev => prev.map((r, idx) => idx === i ? {
-          ...r,
-          status: top ? 'found' : 'not_found',
-          matchAsin: top?.asin || '',
-          matchTitle: top?.title || '',
-          matchImage: top?.image || '',
-        } : r))
-      } catch {
-        setCsvRows(prev => prev.map((r, idx) => idx === i ? { ...r, status: 'error' } : r))
-      }
-      setCsvSearchProgress(i + 1)
-    }
-    setCsvSearching(false)
-  }
-
-  const handleCsvRowAsinChange = (index: number, value: string) => {
-    setCsvRows(prev => prev.map((r, idx) => idx === index ? { ...r, matchAsin: value.toUpperCase() } : r))
-  }
-
-  const handleCsvRowToggle = (index: number) => {
-    setCsvRows(prev => prev.map((r, idx) => idx === index ? { ...r, include: !r.include } : r))
-  }
-
-  const csvLinkablePairs = useMemo(
-    () => csvRows.filter(r => r.include && /^[A-Z0-9]{10}$/.test(r.matchAsin)).map(r => ({ ebayId: r.ebayId, asin: r.matchAsin })),
-    [csvRows],
-  )
-
-  const handleCsvLinkSubmit = async () => {
-    if (!activeStore || csvLinkablePairs.length === 0) return
-    setCsvLinking(true)
-    setCsvLinkResult(null)
-    try {
-      const result = await linkExistingListings(activeStore.id, csvLinkablePairs)
-      setCsvLinkResult(result)
-      if (result.failed.length === 0) {
-        const linkedIds = new Set(csvLinkablePairs.map(p => p.ebayId))
-        setCsvRows(prev => prev.filter(r => !linkedIds.has(r.ebayId)))
-      }
-    } catch (err) {
-      setCsvLinkResult({ linked: 0, failed: [{ ebayId: '', asin: '', error: err instanceof Error ? err.message : 'Import failed' }] })
-    } finally {
-      setCsvLinking(false)
-    }
-  }
-
-  const handleClearCsv = () => {
-    setCsvRows([])
-    setCsvParseError(null)
-    setCsvLinkResult(null)
   }
 
   const tabs: { id: Tab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
@@ -1731,233 +1562,7 @@ export default function ListItems() {
         </div>
       )}
 
-      {tab === 'import' && (
-        <div className="space-y-6">
-          <div className="flex gap-2">
-            <button
-              onClick={() => setImportMode('csv')}
-              className={cn('flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors', importMode === 'csv' ? 'bg-brand-50 text-brand-700 border border-brand-200' : 'text-slate-600 hover:bg-slate-100 border border-transparent')}
-            >
-              <Wand2 className="w-4 h-4" /> Auto-detect from CSV
-            </button>
-            <button
-              onClick={() => setImportMode('manual')}
-              className={cn('flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors', importMode === 'manual' ? 'bg-brand-50 text-brand-700 border border-brand-200' : 'text-slate-600 hover:bg-slate-100 border border-transparent')}
-            >
-              <Link2 className="w-4 h-4" /> Manual pairs
-            </button>
-          </div>
-
-          {importMode === 'csv' && (
-            <div className="card">
-              <div className="card-header">
-                <h3 className="font-semibold text-slate-900">Import from another tool's eBay export (auto-detect ASIN)</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Upload an eBay "All active listings" CSV (Seller Hub → Reports → Downloads). For each row, we search Amazon by the listing title and suggest the closest matching ASIN.
-                  Review and edit every match before confirming — automatic matching can be wrong, and a bad match will sync the wrong product's price/stock.
-                </p>
-              </div>
-              <div className="card-body space-y-4">
-                {csvRows.length === 0 ? (
-                  <div>
-                    <label className="flex items-center justify-center gap-2 text-sm text-slate-600 border-2 border-dashed border-slate-300 rounded-lg py-8 cursor-pointer hover:border-brand-400 hover:bg-brand-50/30 transition">
-                      <input type="file" accept=".csv" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleCsvFile(f) }} />
-                      <Upload className="w-5 h-5" /> Click to upload eBay listings CSV
-                    </label>
-                    {csvParseError && <div className="mt-3 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">{csvParseError}</div>}
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex items-center justify-between flex-wrap gap-3">
-                      <p className="text-sm text-slate-600">{csvRows.length} listing{csvRows.length === 1 ? '' : 's'} loaded from CSV</p>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => void handleFindAsins()}
-                          disabled={csvSearching}
-                          className="btn-primary text-sm disabled:bg-slate-300 disabled:cursor-not-allowed disabled:border-slate-300"
-                        >
-                          {csvSearching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                          {csvSearching ? `Searching ${csvSearchProgress}/${csvRows.length}…` : 'Find ASINs'}
-                        </button>
-                        <button onClick={handleClearCsv} className="btn-ghost text-sm text-slate-500">
-                          <X className="w-4 h-4" /> Clear
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="overflow-x-auto border border-slate-200 rounded-lg">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
-                            <th className="px-3 py-2 w-10"></th>
-                            <th className="px-3 py-2 font-medium">eBay Item</th>
-                            <th className="px-3 py-2 font-medium">Suggested match</th>
-                            <th className="px-3 py-2 font-medium">ASIN</th>
-                            <th className="px-3 py-2 font-medium">Status</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {csvRows.map((row, idx) => (
-                            <tr key={row.ebayId + idx} className="border-b border-slate-100">
-                              <td className="px-3 py-2">
-                                <input type="checkbox" checked={row.include} onChange={() => handleCsvRowToggle(idx)} className="w-4 h-4 text-brand-600 rounded border-slate-300" />
-                              </td>
-                              <td className="px-3 py-2 max-w-xs">
-                                <p className="text-slate-800 truncate">{row.ebayTitle}</p>
-                                <p className="text-xs text-slate-400 font-mono">{row.ebayId}</p>
-                              </td>
-                              <td className="px-3 py-2 max-w-xs">
-                                {row.matchTitle ? (
-                                  <div className="flex items-center gap-2">
-                                    {row.matchImage && <img src={row.matchImage} alt="" className="w-8 h-8 object-cover rounded border border-slate-200 shrink-0" />}
-                                    <span className="text-xs text-slate-600 truncate">{row.matchTitle}</span>
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-slate-400">—</span>
-                                )}
-                              </td>
-                              <td className="px-3 py-2">
-                                <input
-                                  className="input text-xs font-mono py-1 w-32"
-                                  value={row.matchAsin}
-                                  onChange={e => handleCsvRowAsinChange(idx, e.target.value)}
-                                  placeholder="B0..."
-                                />
-                              </td>
-                              <td className="px-3 py-2">
-                                {row.status === 'pending' && <span className="text-xs text-slate-400">Not searched</span>}
-                                {row.status === 'searching' && <span className="text-xs text-brand-600 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Searching…</span>}
-                                {row.status === 'found' && <span className="text-xs text-emerald-600 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /> Found</span>}
-                                {row.status === 'not_found' && <span className="text-xs text-amber-600">No match</span>}
-                                {row.status === 'error' && <span className="text-xs text-red-500">Error</span>}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="flex items-center justify-between flex-wrap gap-3">
-                      <p className="text-xs text-slate-400">{csvLinkablePairs.length} row{csvLinkablePairs.length === 1 ? '' : 's'} ready to link (checked, with a valid 10-character ASIN)</p>
-                      <button
-                        onClick={() => void handleCsvLinkSubmit()}
-                        disabled={csvLinking || csvLinkablePairs.length === 0 || !activeStore}
-                        className="btn-primary text-sm disabled:bg-slate-300 disabled:cursor-not-allowed disabled:border-slate-300"
-                      >
-                        {csvLinking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2 className="w-4 h-4" />}
-                        {csvLinking ? 'Linking...' : `Link ${csvLinkablePairs.length} listing${csvLinkablePairs.length === 1 ? '' : 's'}`}
-                      </button>
-                    </div>
-
-                    {csvLinkResult && (
-                      <div className="text-sm bg-slate-50 rounded-lg px-4 py-3 space-y-2">
-                        <p className="text-emerald-700 font-medium">{csvLinkResult.linked} linked successfully</p>
-                        {csvLinkResult.failed.length > 0 && (
-                          <div className="text-red-600 text-xs space-y-1">
-                            {csvLinkResult.failed.map((f, idx) => (
-                              <p key={idx}><span className="font-mono">{f.ebayId} / {f.asin}</span> — {f.error}</p>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
-          {importMode === 'manual' && (
-            <div className="card">
-              <div className="card-header">
-                <h3 className="font-semibold text-slate-900">Link to Amazon (manual)</h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  For listings that already exist live on eBay (created in Seller Hub, another tool, or before you started using this app).
-                  Pair each eBay listing ID with its Amazon ASIN so it becomes trackable here — stock checks, price sync, and drafts will start working for it.
-                  This does not create anything new on eBay, it only links what's already there.
-                </p>
-              </div>
-              <div className="card-body space-y-4">
-                <div className="text-xs bg-blue-50 text-blue-700 rounded-lg px-3 py-2">
-                  Format: <span className="font-mono">ebay_item_id,asin</span> — one pair per line. Example: <span className="font-mono">222136387160,B00A850UVG</span>
-                </div>
-
-                <div>
-                  <label className="label">Source market</label>
-                  <select className="input max-w-xs" disabled value="amazon.com">
-                    <option>amazon.com</option>
-                  </select>
-                </div>
-
-                <div>
-                  <input
-                    ref={manualFileInputRef}
-                    type="file"
-                    accept=".csv,.txt"
-                    className="hidden"
-                    onChange={e => { const f = e.target.files?.[0]; if (f) handleImportFile(f) }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowManualUpload(v => !v)}
-                    className="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"
-                  >
-                    <span className={cn(
-                      'w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors',
-                      showManualUpload ? 'bg-brand-600 border-brand-600' : 'border-slate-300 bg-white',
-                    )}>
-                      {showManualUpload && <CheckCircle2 className="w-3 h-3 text-white" />}
-                    </span>
-                    Upload CSV file
-                  </button>
-
-                  {showManualUpload && (
-                    <button
-                      type="button"
-                      onClick={() => manualFileInputRef.current?.click()}
-                      className="w-full flex items-center justify-center text-sm text-slate-500 border-2 border-dashed border-slate-300 rounded-lg py-3 mb-3 hover:border-brand-400 hover:bg-brand-50/30 transition"
-                    >
-                      {manualFileName ? manualFileName : 'Choose File'}
-                    </button>
-                  )}
-
-                  <textarea
-                    rows={8}
-                    className="input font-mono text-sm"
-                    value={importText}
-                    onChange={e => setImportText(e.target.value)}
-                    placeholder={'ebay_item_id,asin\n222136387160,B00A850UVG'}
-                  />
-                  <p className="mt-1 text-xs text-slate-400">{parsedImportPairs.length} valid pair{parsedImportPairs.length === 1 ? '' : 's'} detected</p>
-                </div>
-
-                <button
-                  onClick={() => void handleImportSubmit()}
-                  disabled={importRunning || parsedImportPairs.length === 0 || !activeStore}
-                  className="btn-primary disabled:bg-slate-300 disabled:cursor-not-allowed disabled:border-slate-300"
-                >
-                  {importRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2 className="w-4 h-4" />}
-                  {importRunning ? 'Linking...' : `Submit (${parsedImportPairs.length})`}
-                </button>
-
-                {importError && <div className="text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">{importError}</div>}
-                {importResult && (
-                  <div className="text-sm bg-slate-50 rounded-lg px-4 py-3 space-y-2">
-                    <p className="text-emerald-700 font-medium">{importResult.linked} linked successfully</p>
-                    {importResult.failed.length > 0 && (
-                      <div className="text-red-600 text-xs space-y-1">
-                        {importResult.failed.map((f, idx) => (
-                          <p key={idx}><span className="font-mono">{f.ebayId} / {f.asin}</span> — {f.error}</p>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {tab === 'import' && <ImportPanel />}
 
       {openRun && (
         <BulkRunDetailModal
@@ -1965,6 +1570,601 @@ export default function ListItems() {
           ebayIdByAsin={ebayIdByAsin}
           onClose={() => setOpenRunId(null)}
         />
+      )}
+    </div>
+  )
+}
+
+// ---- Import: link listings that are already live on eBay to their Amazon ASIN ----
+// Nothing is created or changed on eBay here. The only database change is setting the ASIN on
+// a listing row that eBay itself already reported for the chosen store (the 15-minute
+// "sync-all-listings" job, or "Sync from eBay", creates those rows). An eBay item ID that does
+// not belong to the chosen store is therefore never linked — no row is ever inserted here.
+
+type ImportRowState =
+  | 'invalid' | 'duplicate'            // problems in the file itself
+  | 'unchecked' | 'ready' | 'already' | 'conflict' | 'missing' // after checking the store
+  | 'linked' | 'failed'                // after linking
+
+interface ImportRow {
+  line: number
+  ebayId: string
+  asin: string
+  csvTitle: string
+  state: ImportRowState
+  problem: string
+  currentAsin: string
+  storeTitle: string
+  include: boolean
+}
+
+const ASIN_RE = /^[A-Z0-9]{10}$/
+const EBAY_ID_HEADERS = ['ebay item id', 'item number', 'item id', 'itemid', 'ebay id', 'ebay_item_id', 'ebay item number', 'listing id', 'ebay listing id', 'ebay_id']
+const ASIN_HEADERS = ['asin', 'amazon asin', 'source asin', 'source id', 'amazon id', 'source_id']
+const SKU_HEADERS = ['custom label (sku)', 'custom label', 'sku', 'sku_hint']
+const TITLE_HEADERS = ['title', 'ebay title', 'listing title', 'item title']
+
+function normHeader(h: string): string {
+  return h.replace(/^﻿/, '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+// Accepts "B0ABC12345", lower case, or an Amazon link (…/dp/B0ABC12345).
+function cleanAsin(raw: string): string {
+  const v = String(raw || '').trim()
+  const fromUrl = v.match(/(?:\/dp\/|\/gp\/product\/|asin=)([A-Z0-9]{10})/i)
+  return (fromUrl ? fromUrl[1] : v).toUpperCase()
+}
+
+// eBay item numbers are 9–19 digits. Excel turns long numbers into "1.47557E+11", which loses
+// digits for good — such a value is reported instead of being guessed.
+function cleanEbayId(raw: string): { id: string; problem: string } {
+  const v = String(raw || '').trim().replace(/^'/, '').replace(/\.0+$/, '')
+  if (!v) return { id: '', problem: 'Missing eBay item ID' }
+  if (/e\+?\d+$/i.test(v)) return { id: v, problem: 'eBay item ID was damaged by Excel (scientific notation) — export the file again without opening it in Excel' }
+  if (!/^\d{9,19}$/.test(v)) return { id: v, problem: 'Not a valid eBay item ID' }
+  return { id: v, problem: '' }
+}
+
+function detectDelimiter(text: string): string {
+  const firstLine = text.replace(/^﻿/, '').split(/\r?\n/).find(l => l.trim()) || ''
+  const counts = [',', ';', '\t'].map(d => ({ d, n: firstLine.split(d).length - 1 }))
+  counts.sort((a, b) => b.n - a.n)
+  return counts[0].n > 0 ? counts[0].d : ','
+}
+
+// Same quoting rules as parseCsv above, but with a configurable delimiter (Excel in many
+// locales, including Turkish, saves CSV files with ";").
+function parseDelimited(text: string, delimiter: string): string[][] {
+  const clean = text.replace(/^﻿/, '')
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i]
+    if (inQuotes) {
+      if (c === '"') {
+        if (clean[i + 1] === '"') { field += '"'; i++ } else { inQuotes = false }
+      } else {
+        field += c
+      }
+    } else if (c === '"') {
+      inQuotes = true
+    } else if (c === delimiter) {
+      row.push(field); field = ''
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && clean[i + 1] === '\n') i++
+      row.push(field); field = ''
+      rows.push(row); row = []
+    } else {
+      field += c
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
+  return rows.filter(r => r.some(c => c.trim() !== ''))
+}
+
+function share(rows: string[][], idx: number, test: (v: string) => boolean): number {
+  const vals = rows.map(r => (r[idx] || '').trim()).filter(Boolean)
+  if (vals.length === 0) return 0
+  return vals.filter(test).length / vals.length
+}
+
+// Finds the header row (some exports start with a few lines of notes) and the columns holding
+// the eBay item ID, the ASIN and the title. Returns an error message when it can't.
+function detectImportColumns(rows: string[][]): { headerRow: number; idIdx: number; asinIdx: number; titleIdx: number } | { error: string } {
+  for (let h = 0; h < Math.min(rows.length, 10); h++) {
+    const header = rows[h].map(normHeader)
+    const sample = rows.slice(h + 1, h + 201)
+    let idIdx = header.findIndex(x => EBAY_ID_HEADERS.includes(x))
+    if (idIdx === -1) continue
+    let asinIdx = header.findIndex(x => ASIN_HEADERS.includes(x))
+    if (asinIdx === -1) {
+      // Many listing tools store the ASIN as the eBay SKU ("Custom label (SKU)").
+      const skuIdx = header.findIndex(x => SKU_HEADERS.includes(x))
+      if (skuIdx !== -1 && share(sample, skuIdx, v => ASIN_RE.test(cleanAsin(v))) >= 0.5) asinIdx = skuIdx
+    }
+    if (asinIdx === -1) {
+      return { error: `Found the eBay item ID column ("${rows[h][idIdx].trim()}") but no ASIN column. The file needs a column named "ASIN" (or a SKU column that contains the ASINs).` }
+    }
+    if (idIdx === asinIdx) idIdx = -1
+    if (idIdx === -1) continue
+    const titleIdx = header.findIndex(x => TITLE_HEADERS.includes(x))
+    return { headerRow: h, idIdx, asinIdx, titleIdx }
+  }
+  return { error: 'Could not find an eBay item ID column. The file needs a column named "eBay Item ID" or "Item number", plus an "ASIN" column.' }
+}
+
+function buildImportRows(entries: Array<{ line: number; ebayId: string; asin: string; title: string }>): ImportRow[] {
+  const seen = new Set<string>()
+  return entries.map(e => {
+    const { id, problem: idProblem } = cleanEbayId(e.ebayId)
+    const asin = cleanAsin(e.asin)
+    let state: ImportRowState = 'unchecked'
+    let problem = ''
+    if (idProblem) { state = 'invalid'; problem = idProblem }
+    else if (!asin) { state = 'invalid'; problem = 'Missing ASIN' }
+    else if (!ASIN_RE.test(asin)) { state = 'invalid'; problem = `"${e.asin.trim()}" is not a valid ASIN` }
+    else if (seen.has(id)) { state = 'duplicate'; problem = 'Same eBay item ID appears earlier in the file' }
+    if (state === 'unchecked') seen.add(id)
+    return { line: e.line, ebayId: id, asin, csvTitle: e.title.trim(), state, problem, currentAsin: '', storeTitle: '', include: false }
+  })
+}
+
+function parseImportFile(text: string): { rows: ImportRow[] } | { error: string } {
+  const table = parseDelimited(text, detectDelimiter(text))
+  if (table.length < 2) return { error: 'The file is empty or has no data rows.' }
+  const cols = detectImportColumns(table)
+  if ('error' in cols) return cols
+  const entries = table.slice(cols.headerRow + 1).map((r, i) => ({
+    line: i + 1,
+    ebayId: r[cols.idIdx] || '',
+    asin: r[cols.asinIdx] || '',
+    title: cols.titleIdx >= 0 ? r[cols.titleIdx] || '' : '',
+  }))
+  return { rows: buildImportRows(entries) }
+}
+
+// Manual box: one pair per line, "ebay_item_id,asin" — either order, separated by comma,
+// semicolon, tab or spaces.
+function parseManualPairs(text: string): ImportRow[] {
+  const entries = text.split(/\r?\n/).map((raw, i) => ({ raw: raw.trim(), line: i + 1 })).filter(x => x.raw)
+    // A header line ("ebay_item_id,asin") has no long number in it — skip it.
+    .filter((x, i) => !(i === 0 && !/\d{9,}/.test(x.raw)))
+    .map(({ raw, line }) => {
+      const parts = raw.split(/[,;\t ]+/).map(p => p.trim()).filter(Boolean)
+      if (parts.length === 2 && ASIN_RE.test(cleanAsin(parts[0])) && /^\d+$/.test(parts[1])) {
+        return { line, ebayId: parts[1], asin: parts[0], title: '' }
+      }
+      return { line, ebayId: parts[0] || '', asin: parts[1] || '', title: '' }
+    })
+  return buildImportRows(entries)
+}
+
+const IMPORT_STATE_INFO: Record<ImportRowState, { label: string; cls: string }> = {
+  unchecked: { label: 'Checking…', cls: 'text-slate-400' },
+  ready: { label: 'Ready to link', cls: 'text-brand-600' },
+  already: { label: 'Already linked', cls: 'text-emerald-600' },
+  conflict: { label: 'Linked to a different ASIN', cls: 'text-amber-600' },
+  missing: { label: 'Not in this store', cls: 'text-amber-600' },
+  invalid: { label: 'Invalid row', cls: 'text-red-500' },
+  duplicate: { label: 'Duplicate', cls: 'text-slate-500' },
+  linked: { label: 'Linked', cls: 'text-emerald-600' },
+  failed: { label: 'Failed', cls: 'text-red-500' },
+}
+const IMPORT_FILTER_ORDER: ImportRowState[] = ['ready', 'conflict', 'missing', 'already', 'linked', 'failed', 'invalid', 'duplicate', 'unchecked']
+const IMPORT_TABLE_LIMIT = 300
+
+const sleepMs = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+async function runPool<T>(items: T[], size: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  await Promise.all(Array.from({ length: Math.min(size, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++]
+      await worker(item)
+    }
+  }))
+}
+
+function ImportPanel() {
+  const { stores, refresh, syncAllEbayListings } = useStoreData()
+  const [storeId, setStoreId] = useState('')
+  const [mode, setMode] = useState<'csv' | 'manual'>('csv')
+  const [manualText, setManualText] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [rows, setRows] = useState<ImportRow[]>([])
+  const [parseError, setParseError] = useState<string | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [checkError, setCheckError] = useState<string | null>(null)
+  const [linking, setLinking] = useState(false)
+  const [phase, setPhase] = useState('')
+  const [progress, setProgress] = useState({ done: 0, total: 0 })
+  const [syncing, setSyncing] = useState(false)
+  const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [filter, setFilter] = useState<ImportRowState | 'all'>('all')
+  const [resultMessage, setResultMessage] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const store = stores.find(s => s.id === storeId) || null
+
+  useEffect(() => {
+    if (!storeId && stores.length === 1) setStoreId(stores[0].id)
+  }, [stores, storeId])
+
+  // Closing the tab mid-way would leave only part of the file linked — warn first.
+  useEffect(() => {
+    if (!linking && !syncing) return
+    const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [linking, syncing])
+
+  // Reads the chosen store's own listing rows for these eBay item IDs and sorts every row into
+  // ready / already linked / linked to another ASIN / not in this store.
+  async function checkAgainstStore(input: ImportRow[], sid: string) {
+    setChecking(true)
+    setCheckError(null)
+    try {
+      const ids = Array.from(new Set(input.filter(r => r.state !== 'invalid' && r.state !== 'duplicate').map(r => r.ebayId)))
+      const found = new Map<string, { asin: string; title: string }>()
+      for (let i = 0; i < ids.length; i += 150) {
+        const chunk = ids.slice(i, i + 150)
+        const { data, error } = await supabase.from('listings').select('ebay_id, asin, title').eq('store_id', sid).in('ebay_id', chunk)
+        if (error) throw new Error(error.message)
+        for (const r of (data || []) as Array<{ ebay_id: string | null; asin: string | null; title: string | null }>) {
+          if (r.ebay_id) found.set(r.ebay_id, { asin: (r.asin || '').toUpperCase(), title: r.title || '' })
+        }
+      }
+      setRows(input.map(r => {
+        if (r.state === 'invalid' || r.state === 'duplicate') return { ...r, include: false }
+        const hit = found.get(r.ebayId)
+        if (!hit) return { ...r, state: 'missing', problem: 'This eBay item ID is not in this store. Connect the eBay account it belongs to, then press "Sync from eBay".', currentAsin: '', storeTitle: '', include: false }
+        if (hit.asin === r.asin) return { ...r, state: 'already', problem: '', currentAsin: hit.asin, storeTitle: hit.title, include: false }
+        if (hit.asin) return { ...r, state: 'conflict', problem: `Currently linked to ${hit.asin}. Tick the row to replace it with ${r.asin}.`, currentAsin: hit.asin, storeTitle: hit.title, include: false }
+        return { ...r, state: 'ready', problem: '', currentAsin: '', storeTitle: hit.title, include: true }
+      }))
+    } catch (err) {
+      setCheckError(err instanceof Error ? err.message : 'Could not check the store')
+      setRows(input)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  function loadRows(next: ImportRow[]) {
+    setResultMessage(null)
+    setFilter('all')
+    setRows(next)
+    if (storeId) void checkAgainstStore(next, storeId)
+  }
+
+  function handleFile(file: File) {
+    setParseError(null)
+    setFileName(file.name)
+    const reader = new FileReader()
+    reader.onload = () => {
+      const parsed = parseImportFile(String(reader.result || ''))
+      if ('error' in parsed) { setParseError(parsed.error); setRows([]); return }
+      if (parsed.rows.length === 0) { setParseError('No data rows were found in this file.'); setRows([]); return }
+      loadRows(parsed.rows)
+    }
+    reader.onerror = () => setParseError('This file could not be read.')
+    reader.readAsText(file)
+  }
+
+  function handleManualLoad() {
+    setParseError(null)
+    const parsed = parseManualPairs(manualText)
+    if (parsed.length === 0) { setParseError('No pairs found. Use one "ebay_item_id,asin" pair per line.'); return }
+    loadRows(parsed)
+  }
+
+  function handleStoreChange(sid: string) {
+    setStoreId(sid)
+    setResultMessage(null)
+    if (rows.length > 0 && sid) void checkAgainstStore(rows.map(r => ({ ...r, state: r.state === 'invalid' || r.state === 'duplicate' ? r.state : 'unchecked' })), sid)
+  }
+
+  function handleClear() {
+    setRows([]); setFileName(''); setParseError(null); setCheckError(null); setResultMessage(null); setSyncMessage(null); setFilter('all')
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  function toggleRow(row: ImportRow) {
+    if (row.state !== 'ready' && row.state !== 'conflict' && row.state !== 'failed') return
+    setRows(prev => prev.map(r => r === row ? { ...r, include: !r.include } : r))
+  }
+
+  async function handleSyncFromEbay() {
+    if (!storeId) return
+    setSyncing(true)
+    setSyncMessage(null)
+    try {
+      const result = await syncAllEbayListings(storeId)
+      setSyncMessage(`Synced ${result.synced} listing${result.synced === 1 ? '' : 's'} from eBay.`)
+      await checkAgainstStore(rows.map(r => ({ ...r, state: r.state === 'invalid' || r.state === 'duplicate' ? r.state : 'unchecked' })), storeId)
+    } catch (err) {
+      setSyncMessage(err instanceof Error ? err.message : 'Sync from eBay failed')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  async function handleLink() {
+    if (!storeId) return
+    const targets: ImportRow[] = rows.filter(r => r.include && (r.state === 'ready' || r.state === 'conflict' || r.state === 'failed'))
+    if (targets.length === 0) return
+    setLinking(true)
+    setResultMessage(null)
+    setProgress({ done: 0, total: targets.length })
+    setPhase('Linking')
+    const outcome = new Map<string, { ok: boolean; error: string }>()
+    let done = 0
+    try {
+      // 1) Set the ASIN on the store's existing row. amazon_price / last_stock_check are reset so
+      //    the next stock check reads the real price for this ASIN.
+      await runPool(targets, 6, async (row: ImportRow) => {
+        try {
+          const { data, error } = await supabase
+            .from('listings')
+            .update({ asin: row.asin, amazon_price: 0, last_stock_check: null })
+            .eq('store_id', storeId)
+            .eq('ebay_id', row.ebayId)
+            .select('id')
+          if (error) throw new Error(error.message)
+          if (!data || data.length === 0) throw new Error('This listing is no longer in this store')
+          outcome.set(row.ebayId, { ok: true, error: '' })
+        } catch (err) {
+          outcome.set(row.ebayId, { ok: false, error: err instanceof Error ? err.message : 'Update failed' })
+        }
+        done++
+        setProgress({ done, total: targets.length })
+      })
+
+      // 2) Verify. The background eBay sync (every 15 minutes) rewrites these rows; if it was
+      //    running at the same moment it can put back the old, empty ASIN. Read the rows back a
+      //    few times over ~1.5 minutes and re-apply any ASIN that didn't stick.
+      const okIds = targets.filter(t => outcome.get(t.ebayId)?.ok).map(t => t.ebayId)
+      const wanted = new Map(targets.map(t => [t.ebayId, t.asin]))
+      for (const [round, waitMs] of [5000, 40000, 45000].entries()) {
+        setPhase(`Verifying (${round + 1}/3)`)
+        await sleepMs(waitMs)
+        const mismatched: string[] = []
+        for (let i = 0; i < okIds.length; i += 150) {
+          const chunk = okIds.slice(i, i + 150)
+          const { data, error } = await supabase.from('listings').select('ebay_id, asin').eq('store_id', storeId).in('ebay_id', chunk)
+          if (error) throw new Error(error.message)
+          const got = new Map(((data || []) as Array<{ ebay_id: string; asin: string | null }>).map(r => [r.ebay_id, (r.asin || '').toUpperCase()]))
+          for (const id of chunk) if (got.get(id) !== wanted.get(id)) mismatched.push(id)
+        }
+        await runPool(mismatched, 6, async (id: string) => {
+          const { error } = await supabase.from('listings').update({ asin: wanted.get(id) }).eq('store_id', storeId).eq('ebay_id', id)
+          if (error) outcome.set(id, { ok: false, error: error.message })
+        })
+      }
+    } catch (err) {
+      setResultMessage(err instanceof Error ? `Stopped: ${err.message}` : 'Linking stopped unexpectedly')
+    } finally {
+      const linkedCount = Array.from(outcome.values()).filter(o => o.ok).length
+      const failedCount = targets.length - linkedCount
+      setRows(prev => prev.map(r => {
+        const o = outcome.get(r.ebayId)
+        if (!o || !targets.includes(r)) return r
+        return o.ok
+          ? { ...r, state: 'linked', problem: '', currentAsin: r.asin, include: false }
+          : { ...r, state: 'failed', problem: o.error, include: true }
+      }))
+      setResultMessage(prev => prev || `${linkedCount} linked${failedCount ? `, ${failedCount} failed — they stay ticked so you can retry` : ''}.`)
+      setLinking(false)
+      setPhase('')
+      refresh()
+    }
+  }
+
+  function downloadProblems() {
+    const problems = rows.filter(r => ['missing', 'invalid', 'duplicate', 'failed', 'conflict'].includes(r.state))
+    const csv = [['Row', 'eBay Item ID', 'ASIN', 'Status', 'Details']]
+      .concat(problems.map(r => [String(r.line), r.ebayId, r.asin, IMPORT_STATE_INFO[r.state].label, r.problem]))
+      .map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))
+      .join('\n')
+    const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'import-problems.csv'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const counts = useMemo(() => {
+    const c = {} as Record<ImportRowState, number>
+    for (const s of IMPORT_FILTER_ORDER) c[s] = 0
+    for (const r of rows) c[r.state]++
+    return c
+  }, [rows])
+  const selectedCount = rows.filter(r => r.include && (r.state === 'ready' || r.state === 'conflict' || r.state === 'failed')).length
+  const visibleRows = filter === 'all' ? rows : rows.filter(r => r.state === filter)
+  const busy = checking || linking || syncing
+
+  return (
+    <div className="space-y-6">
+      <div className="card">
+        <div className="card-header">
+          <h3 className="font-semibold text-slate-900">Link listings that are already live on eBay</h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Upload a CSV with each listing's eBay item ID and Amazon ASIN (for example an export from your previous listing tool).
+            Nothing is created or changed on eBay — this only tells the app which Amazon product each existing eBay listing belongs to.
+            Only eBay item IDs that belong to the selected store can be linked.
+          </p>
+        </div>
+        <div className="card-body space-y-4">
+          <div className="max-w-xs">
+            <label className="label">eBay store the listings are on</label>
+            <select className="input" value={storeId} onChange={e => handleStoreChange(e.target.value)} disabled={busy}>
+              <option value="">Choose a store…</option>
+              {stores.map(s => <option key={s.id} value={s.id}>{s.nickname}</option>)}
+            </select>
+          </div>
+
+          <div className="flex gap-2">
+            <button
+              onClick={() => setMode('csv')}
+              disabled={busy}
+              className={cn('flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors', mode === 'csv' ? 'bg-brand-50 text-brand-700 border border-brand-200' : 'text-slate-600 hover:bg-slate-100 border border-transparent')}
+            >
+              <Upload className="w-4 h-4" /> CSV file
+            </button>
+            <button
+              onClick={() => setMode('manual')}
+              disabled={busy}
+              className={cn('flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors', mode === 'manual' ? 'bg-brand-50 text-brand-700 border border-brand-200' : 'text-slate-600 hover:bg-slate-100 border border-transparent')}
+            >
+              <Link2 className="w-4 h-4" /> Manual pairs
+            </button>
+          </div>
+
+          {mode === 'csv' ? (
+            <div>
+              <input ref={fileInputRef} type="file" accept=".csv,.txt,text/csv" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = '' }} />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={busy}
+                className="w-full flex items-center justify-center gap-2 text-sm text-slate-600 border-2 border-dashed border-slate-300 rounded-lg py-6 hover:border-brand-400 hover:bg-brand-50/30 transition disabled:opacity-50"
+              >
+                <Upload className="w-5 h-5" /> {fileName ? `${fileName} — choose another file` : 'Choose CSV file'}
+              </button>
+              <p className="mt-1 text-xs text-slate-400">
+                Needed columns: <span className="font-mono">eBay Item ID</span> (or <span className="font-mono">Item number</span>) and <span className="font-mono">ASIN</span> (or a SKU column holding the ASIN). Comma or semicolon separated.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <textarea
+                rows={6}
+                className="input font-mono text-sm"
+                value={manualText}
+                onChange={e => setManualText(e.target.value)}
+                placeholder={'ebay_item_id,asin\n147556637636,B0DFPWNMQT'}
+                disabled={busy}
+              />
+              <button onClick={handleManualLoad} disabled={busy || !manualText.trim()} className="btn-secondary text-sm mt-2 disabled:opacity-50">
+                <ListChecks className="w-4 h-4" /> Check pairs
+              </button>
+            </div>
+          )}
+
+          {parseError && <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />{parseError}</div>}
+          {checkError && <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />Could not check the store: {checkError}</div>}
+        </div>
+      </div>
+
+      {rows.length > 0 && (
+        <div className="card">
+          <div className="card-body space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <p className="text-sm text-slate-700">
+                <span className="font-semibold">{rows.length}</span> row{rows.length === 1 ? '' : 's'} loaded
+                {store ? <> · store <span className="font-semibold">{store.nickname}</span></> : <span className="text-amber-600"> · choose a store above</span>}
+                {checking && <span className="text-slate-400"> · checking…</span>}
+              </p>
+              <div className="flex items-center gap-2">
+                {(counts.missing + counts.invalid + counts.duplicate + counts.failed + counts.conflict) > 0 && (
+                  <button onClick={downloadProblems} disabled={busy} className="btn-secondary text-sm"><Download className="w-4 h-4" /> Download problem rows</button>
+                )}
+                <button onClick={handleClear} disabled={busy} className="btn-ghost text-sm text-slate-500"><X className="w-4 h-4" /> Clear</button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => setFilter('all')} className={cn('px-3 py-1 rounded-full text-xs border', filter === 'all' ? 'bg-slate-800 text-white border-slate-800' : 'border-slate-200 text-slate-600 hover:bg-slate-50')}>All {rows.length}</button>
+              {IMPORT_FILTER_ORDER.filter(s => counts[s] > 0).map(s => (
+                <button key={s} onClick={() => setFilter(s)} className={cn('px-3 py-1 rounded-full text-xs border', filter === s ? 'bg-slate-800 text-white border-slate-800' : 'border-slate-200 hover:bg-slate-50', filter === s ? '' : IMPORT_STATE_INFO[s].cls)}>
+                  {IMPORT_STATE_INFO[s].label} {counts[s]}
+                </button>
+              ))}
+            </div>
+
+            {counts.missing > 0 && store && !checking && (
+              <div className="text-sm bg-amber-50 text-amber-800 rounded-lg px-4 py-3 space-y-2">
+                <p>
+                  {counts.missing} eBay item ID{counts.missing === 1 ? ' is' : 's are'} not in <b>{store.nickname}</b>. Either they belong to another eBay account
+                  (connect that account and choose it above), or this store hasn't pulled them from eBay yet.
+                </p>
+                <button onClick={() => void handleSyncFromEbay()} disabled={busy} className="btn-secondary text-sm">
+                  {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                  {syncing ? 'Syncing from eBay…' : `Sync from eBay for ${store.nickname}, then re-check`}
+                </button>
+                {syncMessage && <p className="text-xs">{syncMessage}</p>}
+              </div>
+            )}
+
+            <div className="overflow-x-auto border border-slate-200 rounded-lg">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
+                    <th className="px-3 py-2 w-10"></th>
+                    <th className="px-3 py-2 font-medium">#</th>
+                    <th className="px-3 py-2 font-medium">eBay item</th>
+                    <th className="px-3 py-2 font-medium">ASIN</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visibleRows.slice(0, IMPORT_TABLE_LIMIT).map(row => {
+                    const selectable = row.state === 'ready' || row.state === 'conflict' || row.state === 'failed'
+                    return (
+                      <tr key={row.line} className="border-b border-slate-100 align-top">
+                        <td className="px-3 py-2">
+                          <input type="checkbox" checked={row.include} disabled={!selectable || busy} onChange={() => toggleRow(row)} className="w-4 h-4 text-brand-600 rounded border-slate-300 disabled:opacity-30" />
+                        </td>
+                        <td className="px-3 py-2 text-xs text-slate-400">{row.line}</td>
+                        <td className="px-3 py-2 max-w-sm">
+                          <p className="text-slate-800 truncate">{row.storeTitle || row.csvTitle || '—'}</p>
+                          <p className="text-xs text-slate-400 font-mono">{row.ebayId || '—'}</p>
+                        </td>
+                        <td className="px-3 py-2 font-mono text-xs">
+                          {row.asin || '—'}
+                          {row.state === 'conflict' && <p className="text-amber-600">now: {row.currentAsin}</p>}
+                        </td>
+                        <td className="px-3 py-2 max-w-xs">
+                          <p className={cn('text-xs font-medium', IMPORT_STATE_INFO[row.state].cls)}>{IMPORT_STATE_INFO[row.state].label}</p>
+                          {row.problem && <p className="text-xs text-slate-500">{row.problem}</p>}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {visibleRows.length > IMPORT_TABLE_LIMIT && (
+              <p className="text-xs text-slate-400">Showing the first {IMPORT_TABLE_LIMIT} of {visibleRows.length} rows. Use the filters above to see the rest; every row is processed.</p>
+            )}
+
+            <div className="flex items-center justify-between flex-wrap gap-3 pt-1">
+              <p className="text-xs text-slate-500">
+                {linking
+                  ? `${phase}… ${phase === 'Linking' ? `${progress.done}/${progress.total}` : 'making sure a background eBay sync did not undo any link'} — keep this tab open`
+                  : `${selectedCount} row${selectedCount === 1 ? '' : 's'} selected to link`}
+              </p>
+              <button
+                onClick={() => void handleLink()}
+                disabled={busy || !storeId || selectedCount === 0}
+                className="btn-primary text-sm disabled:bg-slate-300 disabled:cursor-not-allowed disabled:border-slate-300"
+              >
+                {linking ? <Loader2 className="w-4 h-4 animate-spin" /> : <Link2 className="w-4 h-4" />}
+                {linking ? 'Linking…' : `Link ${selectedCount} listing${selectedCount === 1 ? '' : 's'}`}
+              </button>
+            </div>
+
+            {resultMessage && (
+              <div className="flex items-center gap-2 text-sm bg-slate-50 rounded-lg px-4 py-3 text-slate-700">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> {resultMessage}
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </div>
   )
