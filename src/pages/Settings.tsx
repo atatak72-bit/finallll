@@ -63,6 +63,7 @@ export default function Settings() {
           <div className="space-y-3">
             <StoreConnectionSection />
             <SettingsAccordion title="VeRO & words filter" open><VeroSection /></SettingsAccordion>
+            <SettingsAccordion title="Amazon proxy IPs"><ProxySection /></SettingsAccordion>
           </div>
         )}
         {section === 'team' && <TeamSection />}
@@ -1905,6 +1906,287 @@ function TeamSection() {
           ))}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ---- Amazon proxy IPs (per store) ----
+// Each store can have its own proxy list for Amazon price/stock checks. Saved in
+// store_proxy_settings; amazon-fetch reads it. An empty or switched-off list means the store keeps
+// using the default proxy (IPRoyal) exactly as before.
+
+type ProxyProbe = { asin: string; outcome: string; status: number; ms: number; kb: number }
+type ProxyTestRow = { proxy: string; scheme: string; ip: string; ipError: string; probes: ProxyProbe[] }
+
+// Mirrors the parser in amazon-fetch so the count shown here matches what the server will use.
+function countValidProxyLines(text: string): { valid: number; invalid: string[] } {
+  const invalid: string[] = []
+  const seen = new Set<string>()
+  let valid = 0
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    let rest = line.replace(/^(https?|socks5h?):\/\//i, '').replace(/\/+$/, '')
+    let host = '', port = '', user = ''
+    if (rest.includes('@')) {
+      const at = rest.lastIndexOf('@')
+      user = rest.slice(0, at).split(':')[0]
+      rest = rest.slice(at + 1)
+      const hi = rest.lastIndexOf(':')
+      host = hi > 0 ? rest.slice(0, hi) : ''
+      port = hi > 0 ? rest.slice(hi + 1) : ''
+    } else {
+      const parts = rest.split(':')
+      if (parts.length === 2) [host, port] = parts
+      else if (parts.length === 4 && !/^\d+$/.test(parts[1]) && /^\d+$/.test(parts[3])) { user = parts[0]; host = parts[2]; port = parts[3] }
+      else if (parts.length >= 4) { host = parts[0]; port = parts[1]; user = parts[2] }
+    }
+    if (!host || !/^[A-Za-z0-9.-]+$/.test(host.trim()) || !/^\d{2,5}$/.test(port.trim())) {
+      invalid.push(line.length > 40 ? line.slice(0, 40) + '…' : line)
+      continue
+    }
+    const key = `${host.trim()}:${port.trim()}:${user}`
+    if (!seen.has(key)) { seen.add(key); valid++ }
+  }
+  return { valid, invalid }
+}
+
+const PROXY_OUTCOME_LABEL: Record<string, string> = {
+  ok: 'OK', captcha: 'CAPTCHA', blocked: 'Blocked', timeout: 'Timeout', error: 'Connection error', not_found: 'Page not found', other: 'Other',
+}
+
+function ProxySection() {
+  const { stores } = useStoreData()
+  const connectedStores = stores.filter(s => s.connected)
+  const [storeId, setStoreId] = useState('')
+  const [proxyText, setProxyText] = useState('')
+  const [enabled, setEnabled] = useState(true)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [testing, setTesting] = useState(false)
+  const [testProgress, setTestProgress] = useState('')
+  const [testRows, setTestRows] = useState<ProxyTestRow[]>([])
+  const [testError, setTestError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!storeId && connectedStores.length > 0) {
+      setStoreId((connectedStores.find(s => s.active) || connectedStores[0]).id)
+    }
+  }, [connectedStores, storeId])
+
+  useEffect(() => {
+    if (!storeId) return
+    let cancelled = false
+    setLoading(true)
+    setMessage(null)
+    setTestRows([])
+    setTestError(null)
+    async function load() {
+      const { data, error } = await supabase.from('store_proxy_settings').select('proxy_list, enabled').eq('store_id', storeId).maybeSingle()
+      if (cancelled) return
+      if (error) {
+        setMessage({
+          type: 'error',
+          text: /store_proxy_settings/.test(error.message)
+            ? 'The proxy settings table does not exist yet — run store-proxy-settings.sql in Supabase first.'
+            : `Failed to load: ${error.message}`,
+        })
+      }
+      setProxyText(String(data?.proxy_list || ''))
+      setEnabled(data?.enabled ?? true)
+      setLoading(false)
+    }
+    void load()
+    return () => { cancelled = true }
+  }, [storeId])
+
+  const parsed = countValidProxyLines(proxyText)
+
+  async function save() {
+    if (!storeId) return
+    setSaving(true)
+    setMessage(null)
+    try {
+      const { error } = await supabase.from('store_proxy_settings').upsert({
+        store_id: storeId,
+        proxy_list: proxyText,
+        enabled,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'store_id' })
+      if (error) throw new Error(error.message)
+      setMessage({
+        type: 'success',
+        text: enabled && parsed.valid > 0
+          ? `Saved. Amazon checks for this store now use these ${parsed.valid} proxies.`
+          : 'Saved. This store uses the default proxy (IPRoyal).',
+      })
+    } catch (err) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save' })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // Runs up to 3 rounds (each up to 40 Amazon page loads spread over the proxies) against real
+  // ASINs from this store's active listings. Nothing is saved or changed by the test.
+  async function runTest() {
+    if (!storeId || parsed.valid === 0) return
+    setTesting(true)
+    setTestError(null)
+    setTestRows([])
+    try {
+      const { data: rows } = await supabase
+        .from('listings')
+        .select('asin')
+        .eq('store_id', storeId)
+        .eq('status', 'active')
+        .not('asin', 'is', null)
+        .limit(300)
+      const pool = Array.from(new Set(((rows || []) as Array<{ asin: string | null }>).map(r => String(r.asin || '').toUpperCase()).filter(a => /^[A-Z0-9]{10}$/.test(a))))
+      const merged = new Map<string, ProxyTestRow>()
+      const rounds = 3
+      for (let round = 1; round <= rounds; round++) {
+        setTestProgress(`Round ${round}/${rounds}…`)
+        const sample = pool.sort(() => Math.random() - 0.5).slice(0, 10)
+        const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/amazon-fetch`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asin: 'TEST_PROXY_LIST', proxies: proxyText, test_asins: sample }),
+        })
+        const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string; results?: ProxyTestRow[] }
+        if (!res.ok || !data.success || !data.results) throw new Error(data.error || `Test failed (HTTP ${res.status}). Is the new amazon-fetch deployed?`)
+        for (const r of data.results) {
+          const prev = merged.get(r.proxy)
+          merged.set(r.proxy, prev
+            ? { ...prev, ip: prev.ip || r.ip, ipError: prev.ip ? '' : r.ipError, probes: prev.probes.concat(r.probes) }
+            : r)
+        }
+        setTestRows(Array.from(merged.values()))
+      }
+    } catch (err) {
+      setTestError(err instanceof Error ? err.message : 'Test failed')
+    } finally {
+      setTesting(false)
+      setTestProgress('')
+    }
+  }
+
+  const allProbes = testRows.flatMap(r => r.probes)
+  const okCount = allProbes.filter(p => p.outcome === 'ok').length
+  const captchaCount = allProbes.filter(p => p.outcome === 'captcha' || p.outcome === 'blocked').length
+  const failCount = allProbes.length - okCount - captchaCount
+  const okPct = allProbes.length ? Math.round((okCount / allProbes.length) * 100) : 0
+  const okProbes = allProbes.filter(p => p.outcome === 'ok')
+  const avgMs = okProbes.length ? Math.round(okProbes.reduce((a, p) => a + p.ms, 0) / okProbes.length) : 0
+
+  if (connectedStores.length === 0) {
+    return <p className="text-sm text-slate-500">Connect an eBay store first.</p>
+  }
+
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-slate-600">
+        Proxies used for this store's Amazon price and stock checks. Each check uses a different proxy from the list; a proxy that
+        gets a CAPTCHA is rested for 10 minutes. Leave the list empty (or switch it off) to keep using the default proxy.
+      </p>
+
+      <div className="flex flex-wrap items-end gap-6">
+        <div className="max-w-xs w-full">
+          <label className="label">Store</label>
+          <select className="input" value={storeId} onChange={e => setStoreId(e.target.value)} disabled={testing || saving}>
+            {connectedStores.map(s => <option key={s.id} value={s.id}>{s.nickname}</option>)}
+          </select>
+        </div>
+        <div className="flex items-center gap-3 pb-2">
+          <Toggle checked={enabled} onChange={setEnabled} />
+          <span className="text-sm text-slate-700">Use this list for this store</span>
+        </div>
+      </div>
+
+      <div>
+        <label className="label">Proxy list (one per line)</label>
+        <textarea
+          rows={8}
+          className="input font-mono text-xs"
+          value={proxyText}
+          onChange={e => setProxyText(e.target.value)}
+          placeholder={'ip:port:username:password\n38.154.0.1:5868:myuser:mypass\nsocks5://myuser:mypass@38.154.0.2:6000'}
+          disabled={loading}
+          spellCheck={false}
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          {parsed.valid} valid prox{parsed.valid === 1 ? 'y' : 'ies'}
+          {parsed.invalid.length > 0 && <span className="text-error-600"> · {parsed.invalid.length} line{parsed.invalid.length === 1 ? '' : 's'} not understood: {parsed.invalid.slice(0, 3).join(', ')}</span>}
+          {' '}· Formats: ip:port:user:pass, user:pass@ip:port, http://… or socks5://…
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn-primary" onClick={() => void save()} disabled={saving || loading || testing}>
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+        <button className="btn-secondary" onClick={() => void runTest()} disabled={testing || parsed.valid === 0}>
+          {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          {testing ? `Testing… ${testProgress}` : 'Test proxies on Amazon'}
+        </button>
+        {message && <span className={cn('text-sm', message.type === 'success' ? 'text-success-600' : 'text-error-600')}>{message.text}</span>}
+      </div>
+      <p className="text-xs text-slate-400">The test uses the list as typed above (no need to save first) and loads real product pages from this store's listings. It takes about a minute.</p>
+
+      {testError && (
+        <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" /> {testError}
+        </div>
+      )}
+
+      {testRows.length > 0 && (
+        <div className="space-y-3">
+          <div className={cn('rounded-lg px-4 py-3 text-sm', okPct >= 90 ? 'bg-success-50 text-success-700' : okPct >= 60 ? 'bg-amber-50 text-amber-800' : 'bg-error-50 text-error-700')}>
+            <p className="font-semibold">
+              {okPct}% of {allProbes.length} Amazon pages loaded correctly
+              {avgMs > 0 && <span className="font-normal"> · average {(avgMs / 1000).toFixed(1)}s</span>}
+            </p>
+            <p className="text-xs mt-0.5">
+              {okCount} OK · {captchaCount} CAPTCHA/blocked · {failCount} connection errors/timeouts.{' '}
+              {okPct >= 90 ? 'These proxies work for Amazon.' : okPct >= 60 ? 'Usable, but expect retries.' : 'Not suitable for Amazon — try other proxies.'}
+            </p>
+          </div>
+          <div className="overflow-x-auto border border-slate-200 rounded-lg">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
+                  <th className="px-3 py-2 font-medium">Proxy</th>
+                  <th className="px-3 py-2 font-medium">Exit IP</th>
+                  <th className="px-3 py-2 font-medium">Amazon results</th>
+                  <th className="px-3 py-2 font-medium">Avg time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {testRows.map(r => {
+                  const counts: Record<string, number> = {}
+                  for (const p of r.probes) counts[p.outcome] = (counts[p.outcome] || 0) + 1
+                  const ok = r.probes.filter(p => p.outcome === 'ok')
+                  const avg = ok.length ? ok.reduce((a, p) => a + p.ms, 0) / ok.length : 0
+                  return (
+                    <tr key={r.proxy} className="border-b border-slate-100">
+                      <td className="px-3 py-2 font-mono text-xs">{r.proxy}<span className="text-slate-400"> · {r.scheme}</span></td>
+                      <td className="px-3 py-2 font-mono text-xs">{r.ip || <span className="text-error-600">{r.ipError || 'no answer'}</span>}</td>
+                      <td className="px-3 py-2 text-xs">
+                        {Object.entries(counts).map(([k, n]) => (
+                          <span key={k} className={cn('mr-2', k === 'ok' ? 'text-success-600' : 'text-error-600')}>{PROXY_OUTCOME_LABEL[k] || k} {n}</span>
+                        ))}
+                      </td>
+                      <td className="px-3 py-2 text-xs">{avg ? `${(avg / 1000).toFixed(1)}s` : '—'}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
