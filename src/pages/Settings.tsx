@@ -1915,7 +1915,7 @@ function TeamSection() {
 // store_proxy_settings; amazon-fetch reads it. An empty or switched-off list means the store keeps
 // using the default proxy (IPRoyal) exactly as before.
 
-type ProxyProbe = { asin: string; outcome: string; status: number; ms: number; kb: number }
+type ProxyProbe = { asin: string; outcome: string; status: number; ms: number; kb: number; location?: string }
 type ProxyTestRow = { proxy: string; scheme: string; ip: string; ipError: string; probes: ProxyProbe[] }
 
 // Mirrors the parser in amazon-fetch so the count shown here matches what the server will use.
@@ -1952,7 +1952,7 @@ function countValidProxyLines(text: string): { valid: number; invalid: string[] 
 }
 
 const PROXY_OUTCOME_LABEL: Record<string, string> = {
-  ok: 'OK', captcha: 'CAPTCHA', blocked: 'Blocked', timeout: 'Timeout', error: 'Connection error', not_found: 'Page not found', other: 'Other',
+  ok: 'OK', captcha: 'CAPTCHA', blocked: 'Blocked', wrong_country: 'Not a US IP', timeout: 'Timeout', error: 'Connection error', not_found: 'Page not found', other: 'Other',
 }
 
 function ProxySection() {
@@ -2028,7 +2028,7 @@ function ProxySection() {
     }
   }
 
-  // Runs up to 3 rounds (each up to 40 Amazon page loads spread over the proxies) against real
+  // Runs up to 3 rounds (each up to 30 Amazon page loads spread over the proxies) against real
   // ASINs from this store's active listings. Nothing is saved or changed by the test.
   async function runTest() {
     if (!storeId || parsed.valid === 0) return
@@ -2075,7 +2075,8 @@ function ProxySection() {
   const allProbes = testRows.flatMap(r => r.probes)
   const okCount = allProbes.filter(p => p.outcome === 'ok').length
   const captchaCount = allProbes.filter(p => p.outcome === 'captcha' || p.outcome === 'blocked').length
-  const failCount = allProbes.length - okCount - captchaCount
+  const foreignCount = allProbes.filter(p => p.outcome === 'wrong_country').length
+  const failCount = allProbes.length - okCount - captchaCount - foreignCount
   const okPct = allProbes.length ? Math.round((okCount / allProbes.length) * 100) : 0
   const okProbes = allProbes.filter(p => p.outcome === 'ok')
   const avgMs = okProbes.length ? Math.round(okProbes.reduce((a, p) => a + p.ms, 0) / okProbes.length) : 0
@@ -2133,7 +2134,7 @@ function ProxySection() {
         </button>
         {message && <span className={cn('text-sm', message.type === 'success' ? 'text-success-600' : 'text-error-600')}>{message.text}</span>}
       </div>
-      <p className="text-xs text-slate-400">The test uses the list as typed above (no need to save first) and loads real product pages from this store's listings. It takes about a minute.</p>
+      <p className="text-xs text-slate-400">The test uses the list as typed above (no need to save first) and loads real product pages from this store's listings. It takes about a minute. Use US proxies only.</p>
 
       {testError && (
         <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">
@@ -2149,9 +2150,14 @@ function ProxySection() {
               {avgMs > 0 && <span className="font-normal"> · average {(avgMs / 1000).toFixed(1)}s</span>}
             </p>
             <p className="text-xs mt-0.5">
-              {okCount} OK · {captchaCount} CAPTCHA/blocked · {failCount} connection errors/timeouts.{' '}
+              {okCount} OK · {captchaCount} CAPTCHA/blocked{foreignCount > 0 ? ` · ${foreignCount} from non-US IPs` : ''} · {failCount} connection errors/timeouts.{' '}
               {okPct >= 90 ? 'These proxies work for Amazon.' : okPct >= 60 ? 'Usable, but expect retries.' : 'Not suitable for Amazon — try other proxies.'}
             </p>
+            {foreignCount > 0 && (
+              <p className="text-xs mt-1 font-medium">
+                Remove the proxies marked "Not a US IP" — amazon.com shows other prices and hides Add to Cart for other countries, so they are never used for stock checks.
+              </p>
+            )}
           </div>
           <div className="overflow-x-auto border border-slate-200 rounded-lg">
             <table className="w-full text-sm">
@@ -2159,6 +2165,7 @@ function ProxySection() {
                 <tr className="border-b border-slate-200 text-left text-xs text-slate-500 uppercase tracking-wider bg-slate-50">
                   <th className="px-3 py-2 font-medium">Proxy</th>
                   <th className="px-3 py-2 font-medium">Exit IP</th>
+                  <th className="px-3 py-2 font-medium">Amazon delivers to</th>
                   <th className="px-3 py-2 font-medium">Amazon results</th>
                   <th className="px-3 py-2 font-medium">Avg time</th>
                 </tr>
@@ -2173,6 +2180,7 @@ function ProxySection() {
                     <tr key={r.proxy} className="border-b border-slate-100">
                       <td className="px-3 py-2 font-mono text-xs">{r.proxy}<span className="text-slate-400"> · {r.scheme}</span></td>
                       <td className="px-3 py-2 font-mono text-xs">{r.ip || <span className="text-error-600">{r.ipError || 'no answer'}</span>}</td>
+                      <td className="px-3 py-2 text-xs">{r.probes.find(p => p.location)?.location || '—'}</td>
                       <td className="px-3 py-2 text-xs">
                         {Object.entries(counts).map(([k, n]) => (
                           <span key={k} className={cn('mr-2', k === 'ok' ? 'text-success-600' : 'text-error-600')}>{PROXY_OUTCOME_LABEL[k] || k} {n}</span>
