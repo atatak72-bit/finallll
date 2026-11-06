@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, Bell, HelpCircle, Package, MessageSquare, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useStoreData } from '../lib/DataContext'
+import { SignOutButton } from './AuthGate'
 
 // ---- Notifications ----
 // Built only from data the app already loads (orders, conversations, revisions, bulk runs),
@@ -239,6 +240,8 @@ export default function Topbar({ title, subtitle }: { title: string; subtitle?: 
           </div>
         )}
       </div>
+
+      <SignOutButton />
 
       {/* Notifications */}
       <div className="relative" ref={bellRef}>
