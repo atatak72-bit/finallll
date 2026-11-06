@@ -3,7 +3,20 @@ import { createClient } from '@supabase/supabase-js'
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: true, autoRefreshToken: true },
+})
+
+/**
+ * Headers for calling our edge functions as the signed-in user.
+ * The functions check this token, so a stranger holding only the public anon key can't use them.
+ */
+export async function authHeaders(): Promise<Record<string, string>> {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  if (!token) throw new Error('Oturum kapandı — lütfen tekrar giriş yapın.')
+  return { Authorization: `Bearer ${token}`, apikey: supabaseAnonKey }
+}
 
 export interface EbayTokenRow {
   id: string
@@ -13,6 +26,8 @@ export interface EbayTokenRow {
   active: boolean
   created_at: string
   updated_at: string
+  sync_all_page?: number | null
+  reconcile_page?: number | null
 }
 
 export interface ListingRow {
@@ -31,6 +46,8 @@ export interface ListingRow {
   promoted: boolean
   created_at: string
   updated_at: string
+  last_stock_check?: string | null
+  sku_hint?: string | null
 }
 
 export interface OrderRow {
