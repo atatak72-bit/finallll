@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { RefreshCw, TrendingUp, TrendingDown, Minus, Loader2, History, ChevronLeft, ChevronRight } from 'lucide-react'
+import { RefreshCw, TrendingUp, TrendingDown, Minus, Loader2, History, ChevronLeft, ChevronRight, AlertCircle } from 'lucide-react'
 import { EmptyState } from '../components/UI'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
@@ -37,6 +37,7 @@ export default function Revisions() {
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const [totalCount, setTotalCount] = useState(0)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const fieldIcon = {
     price: TrendingUp,
@@ -47,28 +48,37 @@ export default function Revisions() {
   async function load() {
     if (!activeStore?.id) { setRevisions([]); setTotalCount(0); setLoading(false); return }
     setLoading(true)
+    setLoadError(null)
     const from = (page - 1) * PAGE_SIZE
     const to = from + PAGE_SIZE - 1
-    const { data, count, error } = await supabase
-      .from('revisions')
-      .select('*', { count: 'exact' })
-      .eq('store_id', activeStore.id)
-      .order('date', { ascending: false })
-      .range(from, to)
+    try {
+      const { data, count, error } = await supabase
+        .from('revisions')
+        .select('id, listing_title, field, old_value, new_value, reason, date', { count: 'exact' })
+        .eq('store_id', activeStore.id)
+        .order('date', { ascending: false })
+        .range(from, to)
 
-    if (!error) {
-      setRevisions((data || []).map((r: { id: string; listing_title: string; field: string; old_value: string; new_value: string; reason: string; date: string }) => ({
-        id: r.id,
-        listingTitle: r.listing_title,
-        field: r.field as Revision['field'],
-        oldValue: r.old_value,
-        newValue: r.new_value,
-        reason: r.reason,
-        date: r.date,
-      })))
-      setTotalCount(count || 0)
+      if (error) {
+        setLoadError(error.message)
+      } else {
+        type RevisionDbRow = { id: string; listing_title: string | null; field: string; old_value: string | null; new_value: string | null; reason: string | null; date: string }
+        setRevisions(((data || []) as unknown as RevisionDbRow[]).map(r => ({
+          id: r.id,
+          listingTitle: r.listing_title || '',
+          field: r.field as Revision['field'],
+          oldValue: r.old_value || '',
+          newValue: r.new_value || '',
+          reason: r.reason || '',
+          date: r.date,
+        })))
+        setTotalCount(count || 0)
+      }
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Revizyonlar yüklenemedi')
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   useEffect(() => {
@@ -92,9 +102,15 @@ export default function Revisions() {
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Refresh
           </button>
         </div>
+        {loadError && (
+          <div role="alert" className="mx-4 mt-4 flex items-start gap-2 text-sm text-error-700 bg-error-50 border border-error-200 rounded-lg px-4 py-2">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>Revizyonlar yüklenemedi: {loadError}</span>
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-16"><Loader2 className="w-8 h-8 text-brand-600 animate-spin" /></div>
-        ) : revisions.length === 0 ? (
+        ) : loadError ? null : revisions.length === 0 ? (
           <EmptyState icon={History} title="No revisions yet" subtitle="Price, quantity, and status changes made to your listings will appear here." />
         ) : (
           <div className="divide-y divide-slate-100">

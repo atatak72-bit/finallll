@@ -1,21 +1,21 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, type ReactNode } from 'react'
 import {
   DollarSign, Tag, Filter, MessageSquare, Users,
   Store, Save, Plus, Trash2, Info, Mail, ChevronDown,
   CreditCard, RotateCcw, Truck, CheckCircle2, Loader2, MapPin,
   RefreshCw, AlertCircle, CircleCheck, CircleDot,
   Clock, Star, MessageSquareText, Package, Percent, HelpCircle, Check,
-  X, Search, Copy, Clipboard, Pencil, Sparkles,
+  X, Search, Copy, Clipboard, Pencil, Sparkles, AlertTriangle,
 } from 'lucide-react'
 import { Toggle } from '../components/UI'
-import { teamMembers } from '../data/mockData'
 import StoreConnectionSection from './StoreConnectionSection'
 import { ConnectStoreModal } from '../components/ConnectStoreModal'
 import { useStoreData } from '../lib/DataContext'
 import { formatCurrency, formatDate, cn, calculateEbayPrice, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE } from '../lib/utils'
-import { supabase } from '../lib/supabase'
+import { supabase, authHeaders } from '../lib/supabase'
 
-type Section = 'general' | 'ebay-policies' | 'filters' | 'templates' | 'auto-messages' | 'auto-ordering' | 'tracking' | 'advanced' | 'team'
+// Team tab removed: it only ever showed mock data (no real team/roles backend exists yet).
+type Section = 'general' | 'ebay-policies' | 'filters' | 'templates' | 'auto-messages' | 'auto-ordering' | 'tracking' | 'advanced'
 
 const sections: { id: Section; label: string }[] = [
   { id: 'general', label: 'General' },
@@ -25,14 +25,166 @@ const sections: { id: Section; label: string }[] = [
   { id: 'auto-messages', label: 'Auto Messages' },
   { id: 'tracking', label: 'Tracking' },
   { id: 'advanced', label: 'Advanced' },
-  { id: 'team', label: 'Team' },
 ]
+
+// ---- Shared helpers ----
+
+type Notice = { type: 'success' | 'error'; text: string } | null
+
+function errorText(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message
+  if (err && typeof err === 'object' && 'message' in err && typeof (err as { message: unknown }).message === 'string') {
+    return (err as { message: string }).message
+  }
+  return fallback
+}
+
+function NoticeText({ notice }: { notice: Notice }) {
+  if (!notice) return null
+  return notice.type === 'success'
+    ? <span className="flex items-center gap-1 text-sm text-success-600"><CheckCircle2 className="h-4 w-4 shrink-0" /> {notice.text}</span>
+    : <span className="flex items-center gap-1 text-sm text-error-600"><AlertCircle className="h-4 w-4 shrink-0" /> {notice.text}</span>
+}
+
+// Shown instead of a section's form when loading its saved values failed. Saving is blocked
+// in that state, because the form would otherwise hold blank/default values and a save would
+// overwrite what is really stored.
+function LoadErrorBox({ text, onRetry }: { text: string; onRetry: () => void }) {
+  return (
+    <div className="flex flex-wrap items-start gap-3 rounded-lg border border-error-200 bg-error-50 px-4 py-3 text-sm text-error-700">
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <p className="font-medium">Could not load the saved settings.</p>
+        <p className="text-xs mt-0.5 break-words">{text}</p>
+        <p className="text-xs mt-0.5">Saving is disabled until they load, so nothing gets overwritten with blank values.</p>
+      </div>
+      <button className="btn-secondary text-sm" onClick={onRetry}><RefreshCw className="h-4 w-4" /> Retry</button>
+    </div>
+  )
+}
+
+// In-app confirmation dialog (used instead of window.confirm for anything that overwrites data).
+function ConfirmDialog({
+  open, title, children, confirmLabel, danger = false, busy = false, confirmDisabled = false, onConfirm, onCancel,
+}: {
+  open: boolean
+  title: string
+  children: ReactNode
+  confirmLabel: string
+  danger?: boolean
+  busy?: boolean
+  confirmDisabled?: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 px-4" onClick={() => { if (!busy) onCancel() }}>
+      <div className="w-full max-w-md rounded-xl bg-white shadow-2xl" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-2 border-b border-slate-200 px-5 py-4">
+          <AlertTriangle className={cn('h-5 w-5', danger ? 'text-error-600' : 'text-amber-500')} />
+          <h3 className="font-semibold text-slate-900">{title}</h3>
+        </div>
+        <div className="space-y-2 px-5 py-4 text-sm text-slate-600">{children}</div>
+        <div className="flex justify-end gap-2 border-t border-slate-200 px-5 py-3">
+          <button className="btn-ghost text-sm" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className={cn(danger ? 'btn-danger' : 'btn-primary', 'text-sm')} onClick={onConfirm} disabled={busy || confirmDisabled}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// The ONE store every Settings section edits: the store marked active in ebay_tokens
+// (falls back to the first connected store if none is marked).
+function useActiveStore() {
+  const { stores } = useStoreData()
+  const connectedStores = stores.filter(s => s.connected)
+  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  return { connectedStores, activeStore }
+}
+
+function storeLabel(store: { ebayUsername?: string; nickname?: string } | undefined): string {
+  return store?.ebayUsername || store?.nickname || 'No store connected'
+}
+
+// Persists which store is active: active=true for the chosen store, active=false for every
+// other store, then reloads the app data so every page switches to that store.
+function useActivateStore() {
+  const { stores, refresh } = useStoreData()
+  const [switchingId, setSwitchingId] = useState<string | null>(null)
+  const [switchError, setSwitchError] = useState<string | null>(null)
+
+  async function activate(storeId: string) {
+    if (!storeId) return
+    setSwitchingId(storeId)
+    setSwitchError(null)
+    try {
+      const { data: onRows, error: onErr } = await supabase
+        .from('ebay_tokens')
+        .update({ active: true })
+        .eq('id', storeId)
+        .select('id')
+      if (onErr) throw new Error(onErr.message)
+      if (!onRows || onRows.length === 0) throw new Error('Not allowed to change the active store (0 rows updated).')
+      const otherIds = stores.filter(s => s.id !== storeId).map(s => s.id)
+      if (otherIds.length > 0) {
+        const { error: offErr } = await supabase
+          .from('ebay_tokens')
+          .update({ active: false })
+          .in('id', otherIds)
+          .select('id')
+        if (offErr) throw new Error(`The new store was activated, but the other stores could not be deactivated: ${offErr.message}`)
+      }
+    } catch (err) {
+      setSwitchError(errorText(err, 'Failed to switch the active store'))
+    } finally {
+      try {
+        await refresh()
+      } catch (refreshErr) {
+        setSwitchError(errorText(refreshErr, 'Switched, but reloading the data failed — reload the page.'))
+      }
+      setSwitchingId(null)
+    }
+  }
+
+  return { activate, switchingId, switchError }
+}
+
+function ActiveStoreBar() {
+  const { connectedStores, activeStore } = useActiveStore()
+  const { activate, switchingId, switchError } = useActivateStore()
+
+  if (connectedStores.length === 0) {
+    return <p className="mt-5 text-xs text-slate-500">No eBay store connected yet — connect one in the eBay Policies tab.</p>
+  }
+
+  return (
+    <div className="mt-5 flex flex-wrap items-center gap-3">
+      <label className="text-xs text-slate-500" htmlFor="settings-active-store">Editing settings for</label>
+      <select
+        id="settings-active-store"
+        className="input max-w-xs py-1.5 text-sm"
+        value={activeStore?.id || ''}
+        onChange={e => void activate(e.target.value)}
+        disabled={!!switchingId || connectedStores.length < 2}
+      >
+        {connectedStores.map(s => <option key={s.id} value={s.id}>{storeLabel(s)}</option>)}
+      </select>
+      {switchingId && <span className="flex items-center gap-1 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Switching active store…</span>}
+      {connectedStores.length > 1 && !switchingId && (
+        <span className="text-xs text-slate-400">Changing this switches the active store for the whole app.</span>
+      )}
+      {switchError && <span className="text-xs text-error-600">{switchError}</span>}
+    </div>
+  )
+}
 
 export default function Settings() {
   const [section, setSection] = useState<Section>('general')
-  const { stores } = useStoreData()
-  const activeStore = stores.find(store => store.active) || stores[0]
-  const activeStoreName = activeStore?.ebayUsername || activeStore?.nickname || 'No store connected'
 
   return (
     <div className="max-w-6xl">
@@ -51,7 +203,7 @@ export default function Settings() {
           ))}
         </div>
       </div>
-      <p className="mt-5 text-xs text-slate-500">Editing settings for <span className="font-medium text-slate-700">{activeStoreName}</span></p>
+      <ActiveStoreBar />
       <div className="mt-3">
         {section === 'general' && <GeneralSettings />}
         {section === 'ebay-policies' && <EbayPoliciesSection />}
@@ -63,10 +215,9 @@ export default function Settings() {
           <div className="space-y-3">
             <StoreConnectionSection />
             <SettingsAccordion title="VeRO & words filter" open><VeroSection /></SettingsAccordion>
-            <SettingsAccordion title="Amazon proxy IPs"><ProxySection /></SettingsAccordion>
+            <SettingsAccordion title="Amazon proxy IPs (fallback)"><ProxySection /></SettingsAccordion>
           </div>
         )}
-        {section === 'team' && <TeamSection />}
       </div>
     </div>
   )
@@ -124,9 +275,9 @@ type StoreSettings = {
 type CategorySuggestion = { categoryId: string; categoryName: string; path: string }
 
 function EbayPoliciesSection() {
-  const { stores, refresh } = useStoreData()
-  const connectedStores = stores.filter(store => store.connected)
-  const [selectedStoreId, setSelectedStoreId] = useState(connectedStores[0]?.id || '')
+  const { refresh } = useStoreData()
+  const { connectedStores, activeStore } = useActiveStore()
+  const { activate, switchingId, switchError } = useActivateStore()
   const [policies, setPolicies] = useState<PoliciesResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -151,13 +302,14 @@ function EbayPoliciesSection() {
   const [savingCategory, setSavingCategory] = useState(false)
   const [locationMessage, setLocationMessage] = useState<string | null>(null)
   const [locationError, setLocationError] = useState<string | null>(null)
+  const [categoryNotice, setCategoryNotice] = useState<Notice>(null)
+  // Set when the saved policy/location/category settings could not be loaded. Every save here
+  // sends ALL of these fields, so saving with blank fields would wipe the saved policy IDs.
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
 
-  const selectedStore = connectedStores.find(store => store.id === selectedStoreId) || connectedStores[0]
-  const selectedStoreName = selectedStore?.ebayUsername || selectedStore?.nickname || 'No store connected'
-
-  useEffect(() => {
-    if (!selectedStoreId && connectedStores[0]) setSelectedStoreId(connectedStores[0].id)
-  }, [connectedStores, selectedStoreId])
+  // Policies always apply to the ONE active store chosen at the top of Settings.
+  const selectedStore = activeStore
 
   useEffect(() => {
     if (!selectedStore?.id) {
@@ -169,6 +321,10 @@ function EbayPoliciesSection() {
     setLoading(true)
     setMessage(null)
     setError(null)
+    setSettingsLoadError(null)
+    setLocationMessage(null)
+    setLocationError(null)
+    setCategoryNotice(null)
 
     async function loadAll() {
       try {
@@ -194,7 +350,10 @@ function EbayPoliciesSection() {
           })
         }
 
-        const settingsData = (settingsResult.data || {}) as { settings: StoreSettings | null }
+        const settingsData = (settingsResult.data || {}) as { settings?: StoreSettings | null; error?: string }
+        if (settingsResult.error || settingsData.error) {
+          setSettingsLoadError(settingsData.error || errorText(settingsResult.error, 'Failed to load the saved policy settings'))
+        }
         const s = settingsData.settings
         if (s) {
           setSelPaymentId(s.payment_policy_id || '')
@@ -221,6 +380,7 @@ function EbayPoliciesSection() {
         if (!cancelled) {
           setPolicies({ paymentPolicies: [], returnPolicies: [], fulfillmentPolicies: [] })
           setError(err instanceof Error ? err.message : 'Failed to load eBay data')
+          setSettingsLoadError(errorText(err, 'Failed to load eBay data'))
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -229,7 +389,7 @@ function EbayPoliciesSection() {
 
     void loadAll()
     return () => { cancelled = true }
-  }, [selectedStore?.id])
+  }, [selectedStore?.id, reloadKey])
 
   async function reconnectStore(storeId: string) {
     setReconnecting(true)
@@ -276,7 +436,7 @@ function EbayPoliciesSection() {
   }
 
   async function savePolicies() {
-    if (!selectedStore?.id) return
+    if (!selectedStore?.id || settingsLoadError) return
     setSaving(true)
     setMessage(null)
     setError(null)
@@ -308,7 +468,7 @@ function EbayPoliciesSection() {
   }
 
   async function saveLocation() {
-    if (!selectedStore?.id) return
+    if (!selectedStore?.id || settingsLoadError) return
     setSavingLocation(true)
     setLocationMessage(null)
     setLocationError(null)
@@ -346,10 +506,9 @@ function EbayPoliciesSection() {
   }
 
   async function saveCategory() {
-    if (!selectedStore?.id) return
+    if (!selectedStore?.id || settingsLoadError) return
     setSavingCategory(true)
-    setMessage(null)
-    setError(null)
+    setCategoryNotice(null)
     try {
       const { data, error: invokeError } = await supabase.functions.invoke('ebay-policies', {
         body: {
@@ -369,9 +528,9 @@ function EbayPoliciesSection() {
       })
       const result = (data || {}) as { success?: boolean; error?: string }
       if (invokeError || !result.success) throw new Error(result.error || (invokeError as Error)?.message || 'Failed to save category')
-      setMessage('Default category saved.')
+      setCategoryNotice({ type: 'success', text: 'Default category saved.' })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save category')
+      setCategoryNotice({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save category' })
     } finally {
       setSavingCategory(false)
     }
@@ -399,7 +558,7 @@ function EbayPoliciesSection() {
         <SettingsAccordion title="Your stores" open>
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <p className="text-xs text-slate-500">Connected eBay accounts.</p>
+              <p className="text-xs text-slate-500">Connected eBay accounts. The active store is the one every page and every Settings section works on.</p>
               <button className="btn-secondary" onClick={() => setAddStoreOpen(true)}><Plus className="h-4 w-4" /> Connect another store</button>
             </div>
             <div className="space-y-2">
@@ -422,13 +581,22 @@ function EbayPoliciesSection() {
                     {reconnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                     Reconnect
                   </button>
-                  <button
-                    className={cn('text-xs font-medium px-2 py-1 rounded', store.id === selectedStore?.id ? 'bg-brand-100 text-brand-700' : 'text-slate-500 hover:bg-slate-100')}
-                    onClick={() => setSelectedStoreId(store.id)}
-                  >{store.id === selectedStore?.id ? 'Active' : 'Select'}</button>
+                  {store.id === selectedStore?.id ? (
+                    <span className="text-xs font-medium px-2 py-1 rounded bg-brand-100 text-brand-700">Active</span>
+                  ) : (
+                    <button
+                      className="text-xs font-medium px-2 py-1 rounded text-slate-500 hover:bg-slate-100 inline-flex items-center gap-1"
+                      onClick={() => void activate(store.id)}
+                      disabled={!!switchingId}
+                    >
+                      {switchingId === store.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      Make active
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
+            {switchError && <p className="text-sm text-error-600">{switchError}</p>}
           </div>
         </SettingsAccordion>
 
@@ -444,6 +612,9 @@ function EbayPoliciesSection() {
               </span>
             </div>
 
+            {settingsLoadError && !loading && (
+              <LoadErrorBox text={settingsLoadError} onRetry={() => setReloadKey(k => k + 1)} />
+            )}
             {loading ? (
               <div className="p-6 text-center text-sm text-slate-500">Loading policies from eBay…</div>
             ) : (
@@ -472,7 +643,7 @@ function EbayPoliciesSection() {
                   />
                 </div>
                 <div className="flex items-center gap-3">
-                  <button className="btn-secondary" onClick={() => void savePolicies()} disabled={saving}>
+                  <button className="btn-secondary" onClick={() => void savePolicies()} disabled={saving || !!settingsLoadError}>
                     {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                     {saving ? 'Saving…' : 'Use selected policies'}
                   </button>
@@ -498,7 +669,7 @@ function EbayPoliciesSection() {
                       <input className="input mt-1" value={locZip} onChange={event => setLocZip(event.target.value)} placeholder="Enter zip code" />
                     </label>
                   </div>
-                  <button className="btn-primary" onClick={() => void saveLocation()} disabled={savingLocation}>
+                  <button className="btn-primary" onClick={() => void saveLocation()} disabled={savingLocation || !!settingsLoadError}>
                     {savingLocation ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
                     {savingLocation ? 'Saving…' : 'Save'}
                   </button>
@@ -551,10 +722,14 @@ function EbayPoliciesSection() {
                 ))}
               </div>
             )}
-            <button className="btn-primary" onClick={() => void saveCategory()} disabled={savingCategory}>
-              {savingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {savingCategory ? 'Saving…' : 'Save category'}
-            </button>
+            <div className="flex flex-wrap items-center gap-3">
+              <button className="btn-primary" onClick={() => void saveCategory()} disabled={savingCategory || loading || !!settingsLoadError}>
+                {savingCategory ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                {savingCategory ? 'Saving…' : 'Save category'}
+              </button>
+              <NoticeText notice={categoryNotice} />
+              {settingsLoadError && <span className="text-xs text-error-600">Saved settings failed to load — retry above before saving.</span>}
+            </div>
           </div>
         </SettingsAccordion>
       </div>
@@ -613,59 +788,137 @@ const FEE_PRESETS: Record<string, { pct: number; fixed: number; label: string }>
   DE: { pct: 12.5, fixed: 0.35, label: 'Germany' },
 }
 
+// What the listing code uses when a store has NO pricing_settings row (pricing_enabled ?? true,
+// fee 13.25 %, fixed fee $0.30) and NO pricing_rules rows (no tiers → eBay price = Amazon price).
+const PRICING_DEFAULTS = { pricingEnabled: true, pctFee: '13.25', fixedFee: '0.30' }
+
 function genId() {
   return Math.random().toString(36).slice(2, 10)
 }
 
 type PricingTierRow = { id: string; min: string; max: string; profitPct: string; fixProfit: string }
+type ValidTier = { id: string; min: number; max: number; profitPct: number; fixProfit: number }
+
+// Strict number parsing: blank or garbage → null (a validation error), never silently 0.
+// A single decimal comma ("1,5") is accepted as a decimal point.
+function parseNumberInput(value: string): number | null {
+  const trimmed = value.trim().replace(/^\$/, '').replace(/%$/, '').trim()
+  if (!trimmed) return null
+  const normalized = /^-?\d+,\d+$/.test(trimmed) ? trimmed.replace(',', '.') : trimmed
+  if (!/^-?(\d+\.?\d*|\.\d+)$/.test(normalized)) return null
+  const n = Number(normalized)
+  return Number.isFinite(n) ? n : null
+}
+
+type PricingValidation =
+  | { ok: true; pctFee: number; fixedFee: number; tiers: ValidTier[] }
+  | { ok: false; error: string }
+
+function validatePricing(pctFeeText: string, fixedFeeText: string, rows: PricingTierRow[]): PricingValidation {
+  const pctFee = parseNumberInput(pctFeeText)
+  if (pctFee === null) return { ok: false, error: 'Percentage fee must be a number (e.g. 13.25).' }
+  if (pctFee < 0 || pctFee >= 100) return { ok: false, error: 'Percentage fee must be at least 0 and below 100.' }
+  const fixedFee = parseNumberInput(fixedFeeText)
+  if (fixedFee === null) return { ok: false, error: 'Fixed fee must be a number (e.g. 0.30).' }
+  if (fixedFee < 0) return { ok: false, error: 'Fixed fee cannot be negative.' }
+  if (rows.length === 0) return { ok: false, error: 'Add at least one profit tier before saving.' }
+
+  const tiers: ValidTier[] = []
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]
+    const label = `Tier ${i + 1}`
+    const min = parseNumberInput(row.min)
+    const max = parseNumberInput(row.max)
+    const profitPct = parseNumberInput(row.profitPct)
+    const fixProfit = parseNumberInput(row.fixProfit)
+    if (min === null) return { ok: false, error: `${label}: Min must be a number.` }
+    if (max === null) return { ok: false, error: `${label}: Max must be a number.` }
+    if (profitPct === null) return { ok: false, error: `${label}: Profit % must be a number.` }
+    if (fixProfit === null) return { ok: false, error: `${label}: Fixed profit must be a number (use 0 for none).` }
+    if (min < 0) return { ok: false, error: `${label}: Min cannot be negative.` }
+    if (max <= min) return { ok: false, error: `${label}: Max (${max}) must be greater than Min (${min}).` }
+    if (profitPct < 0) return { ok: false, error: `${label}: Profit % cannot be negative.` }
+    if (fixProfit < 0) return { ok: false, error: `${label}: Fixed profit cannot be negative.` }
+    tiers.push({ id: row.id, min, max, profitPct, fixProfit })
+  }
+
+  tiers.sort((a, b) => a.min - b.min || a.max - b.max)
+  if (tiers[0].min !== 0) return { ok: false, error: `The first tier must start at $0 (it starts at $${tiers[0].min}).` }
+  for (let i = 1; i < tiers.length; i++) {
+    const prev = tiers[i - 1]
+    const cur = tiers[i]
+    if (cur.min < prev.max) return { ok: false, error: `Tiers overlap: $${prev.min}–$${prev.max} and $${cur.min}–$${cur.max}. Each tier's Min must equal the previous tier's Max.` }
+    if (cur.min > prev.max) return { ok: false, error: `Gap between tiers: nothing covers $${prev.max}–$${cur.min}. Each tier's Min must equal the previous tier's Max.` }
+  }
+  return { ok: true, pctFee, fixedFee, tiers }
+}
 
 function PricingSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  const { activeStore } = useActiveStore()
 
-  const [pricingEnabled, setPricingEnabled] = useState(true)
-  const [pctFee, setPctFee] = useState('13.25')
-  const [fixedFee, setFixedFee] = useState('0.30')
-  const [tiers, setTiers] = useState<PricingTierRow[]>([
-    { id: genId(), min: '0', max: '25', profitPct: '30', fixProfit: '0' },
-    { id: genId(), min: '25', max: '100', profitPct: '20', fixProfit: '0' },
-    { id: genId(), min: '100', max: '999999', profitPct: '15', fixProfit: '0' },
-  ])
+  const [pricingEnabled, setPricingEnabled] = useState(PRICING_DEFAULTS.pricingEnabled)
+  const [pctFee, setPctFee] = useState(PRICING_DEFAULTS.pctFee)
+  const [fixedFee, setFixedFee] = useState(PRICING_DEFAULTS.fixedFee)
+  const [tiers, setTiers] = useState<PricingTierRow[]>([])
+  const [hasSavedSettings, setHasSavedSettings] = useState(false)
+  const [adRate, setAdRate] = useState<number | null>(null)
+  const [autoPromote, setAutoPromote] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
+    setNotice(null)
     async function load() {
-      const [settingsRes, tiersRes] = await Promise.all([
-        supabase.from('pricing_settings').select('*').eq('store_id', activeStore!.id).maybeSingle(),
-        supabase.from('pricing_rules').select('*').eq('store_id', activeStore!.id).order('sort_order', { ascending: true }),
-      ])
-      if (cancelled) return
-      if (settingsRes.data) {
-        setPricingEnabled(settingsRes.data.pricing_enabled ?? true)
-        setPctFee(String(settingsRes.data.ebay_percentage_fee ?? '13.25'))
-        setFixedFee(String(settingsRes.data.ebay_fixed_fee ?? '0.30'))
-      }
-      if (tiersRes.data && tiersRes.data.length > 0) {
-        setTiers(tiersRes.data.map(t => ({
+      try {
+        const [settingsRes, tiersRes, promotedRes] = await Promise.all([
+          supabase.from('pricing_settings').select('pricing_enabled, ebay_percentage_fee, ebay_fixed_fee').eq('store_id', storeId).maybeSingle(),
+          supabase.from('pricing_rules').select('id, min_price, max_price, profit_pct, fixed_profit, sort_order').eq('store_id', storeId).order('sort_order', { ascending: true }),
+          supabase.from('store_promoted_settings').select('auto_promote_enabled, default_ad_rate').eq('store_id', storeId).maybeSingle(),
+        ])
+        if (cancelled) return
+        if (settingsRes.error) throw new Error(`pricing settings: ${settingsRes.error.message}`)
+        if (tiersRes.error) throw new Error(`pricing rules: ${tiersRes.error.message}`)
+        const settings = settingsRes.data as { pricing_enabled: boolean | null; ebay_percentage_fee: number | null; ebay_fixed_fee: number | null } | null
+        if (settings) {
+          setHasSavedSettings(true)
+          setPricingEnabled(settings.pricing_enabled ?? PRICING_DEFAULTS.pricingEnabled)
+          setPctFee(settings.ebay_percentage_fee != null ? String(settings.ebay_percentage_fee) : PRICING_DEFAULTS.pctFee)
+          setFixedFee(settings.ebay_fixed_fee != null ? String(settings.ebay_fixed_fee) : PRICING_DEFAULTS.fixedFee)
+        } else {
+          setHasSavedSettings(false)
+          setPricingEnabled(PRICING_DEFAULTS.pricingEnabled)
+          setPctFee(PRICING_DEFAULTS.pctFee)
+          setFixedFee(PRICING_DEFAULTS.fixedFee)
+        }
+        const ruleRows = (tiersRes.data || []) as Array<{ id: string; min_price: number | null; max_price: number | null; profit_pct: number | null; fixed_profit: number | null }>
+        setTiers(ruleRows.map(t => ({
           id: t.id,
-          min: String(t.min_price),
-          max: String(t.max_price),
-          profitPct: String(t.profit_pct),
-          fixProfit: String(t.fixed_profit),
+          min: t.min_price != null ? String(t.min_price) : '',
+          max: t.max_price != null ? String(t.max_price) : '',
+          profitPct: t.profit_pct != null ? String(t.profit_pct) : '',
+          fixProfit: t.fixed_profit != null ? String(t.fixed_profit) : '0',
         })))
+        // Promoted settings are only used for the fee breakdown preview — a failure here does not block saving.
+        const promoted = promotedRes.error ? null : promotedRes.data as { auto_promote_enabled: boolean | null; default_ad_rate: number | null } | null
+        setAutoPromote(promoted?.auto_promote_enabled ?? false)
+        setAdRate(promoted?.default_ad_rate != null ? Number(promoted.default_ad_rate) : null)
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load pricing'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   function applyPreset(code: string) {
     const preset = FEE_PRESETS[code]
@@ -675,7 +928,11 @@ function PricingSection() {
   }
 
   function addTier() {
-    setTiers(prev => [...prev, { id: genId(), min: '0', max: '0', profitPct: '20', fixProfit: '0' }])
+    setTiers(prev => {
+      const last = prev[prev.length - 1]
+      const start = last ? last.max : '0'
+      return [...prev, { id: genId(), min: start, max: '', profitPct: '20', fixProfit: '0' }]
+    })
   }
   function removeTier(id: string) {
     setTiers(prev => prev.filter(t => t.id !== id))
@@ -684,56 +941,82 @@ function PricingSection() {
     setTiers(prev => prev.map(t => t.id === id ? { ...t, [field]: value } : t))
   }
 
+  const validation = validatePricing(pctFee, fixedFee, tiers)
+
   async function saveAll() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
+    setNotice(null)
+    const v = validatePricing(pctFee, fixedFee, tiers)
+    if (!v.ok) {
+      setNotice({ type: 'error', text: v.error })
+      return
+    }
     setSaving(true)
-    setMessage(null)
-    setError(null)
     try {
+      // Rules first, in ONE transaction on the server (delete + insert inside the function), so a
+      // failure can never leave the store with zero rules.
+      const { error: rulesErr } = await supabase.rpc('replace_pricing_rules', {
+        p_store_id: activeStore.id,
+        p_rules: v.tiers.map(t => ({ min_price: t.min, max_price: t.max, profit_pct: t.profitPct, fixed_profit: t.fixProfit })),
+      })
+      if (rulesErr) {
+        const missing = /replace_pricing_rules/.test(rulesErr.message) && /(find|exist)/i.test(rulesErr.message)
+        throw new Error(missing
+          ? 'The replace_pricing_rules database function is not installed yet — run replace_pricing_rules.sql in Supabase. Nothing was changed.'
+          : `Pricing tiers not saved: ${rulesErr.message}`)
+      }
+
       const { error: settingsErr } = await supabase.from('pricing_settings').upsert({
         store_id: activeStore.id,
         pricing_enabled: pricingEnabled,
-        ebay_percentage_fee: Number(pctFee) || 0,
-        ebay_fixed_fee: Number(fixedFee) || 0,
+        ebay_percentage_fee: v.pctFee,
+        ebay_fixed_fee: v.fixedFee,
       }, { onConflict: 'store_id' })
-      if (settingsErr) throw new Error(settingsErr.message)
+      if (settingsErr) throw new Error(`Tiers were saved, but the fee settings were not: ${settingsErr.message}`)
 
-      await supabase.from('pricing_rules').delete().eq('store_id', activeStore.id)
-      if (tiers.length > 0) {
-        const { error: tiersErr } = await supabase.from('pricing_rules').insert(
-          tiers.map((t, idx) => ({
-            store_id: activeStore.id,
-            min_price: Number(t.min) || 0,
-            max_price: Number(t.max) || 0,
-            profit_pct: Number(t.profitPct) || 0,
-            fixed_profit: Number(t.fixProfit) || 0,
-            sort_order: idx,
-          }))
-        )
-        if (tiersErr) throw new Error(tiersErr.message)
-      }
-      setMessage('Pricing rules saved.')
+      setHasSavedSettings(true)
+      // Show the tiers in the order they were saved (sorted by Min).
+      const byId = new Map(tiers.map(t => [t.id, t]))
+      setTiers(v.tiers.map(t => byId.get(t.id) || { id: t.id, min: String(t.min), max: String(t.max), profitPct: String(t.profitPct), fixProfit: String(t.fixProfit) }))
+      setNotice({ type: 'success', text: 'Pricing rules saved.' })
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save pricing rules')
+      setNotice({ type: 'error', text: errorText(err, 'Failed to save pricing rules') })
     } finally {
       setSaving(false)
     }
   }
 
-  const previewPrice = tiers.length > 0 ? (() => {
-    const sample = 50
-    const mapped = tiers.map(t => ({ min: Number(t.min) || 0, max: Number(t.max) || 0, profitPct: Number(t.profitPct) || 0, fixProfit: Number(t.fixProfit) || 0 }))
-    return calculateEbayPrice(sample, mapped, Number(pctFee) || 0, Number(fixedFee) || 0, pricingEnabled)
+  // Preview with a full breakdown. The % fee box is meant to hold eBay's final value fee PLUS
+  // the promoted-listing ad rate, so the ad share is shown separately from the eBay share.
+  const sampleCost = 50
+  const preview = validation.ok ? (() => {
+    const result = calculateEbayPrice(sampleCost, validation.tiers, validation.pctFee, validation.fixedFee, pricingEnabled)
+    const sale = result.finalPrice
+    const effectiveAdRate = autoPromote && adRate != null ? adRate : 0
+    const ebayPctShare = Math.max(validation.pctFee - effectiveAdRate, 0)
+    const ebayFees = sale * ebayPctShare / 100 + validation.fixedFee
+    const adFee = sale * effectiveAdRate / 100
+    const net = sale - ebayFees - adFee - sampleCost
+    return { sale, ebayFees, adFee, net, effectiveAdRate, ebayPctShare }
   })() : null
+  const pctFeeNumber = parseNumberInput(pctFee)
+  const adRateNotCovered = autoPromote && adRate != null && pctFeeNumber != null && pctFeeNumber < adRate
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading pricing…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="space-y-5">
+      {!hasSavedSettings && (
+        <div className="flex items-start gap-1.5 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+          <Info className="h-3.5 w-3.5 text-slate-500 shrink-0 mt-0.5" />
+          <p className="text-xs text-slate-600">No pricing settings saved for this store yet — showing the defaults the listing code uses (automatic pricing on, 13.25% + $0.30).</p>
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-slate-900">Enable automatic pricing</p>
-          <p className="text-xs text-slate-500">When off, eBay price defaults to the Amazon price with no markup.</p>
+          <p className="text-xs text-slate-500">When off, the eBay price is set equal to the Amazon price — no markup and no fees covered, so every sale loses at least the eBay fees.</p>
         </div>
         <Toggle checked={pricingEnabled} onChange={setPricingEnabled} />
       </div>
@@ -749,16 +1032,27 @@ function PricingSection() {
         </div>
         <div className="flex items-start gap-1.5 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 mb-3">
           <Info className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
-          <p className="text-xs text-amber-700">Percentage fee is eBay's own cut of the sale — double-check you're editing the right box below, not the profit margin tiers.</p>
+          <div className="text-xs text-amber-700 space-y-1">
+            <p>
+              The percentage box is everything eBay takes as a % of the sale: <span className="font-semibold">eBay's final value fee + your promoted-listing ad rate</span>.
+              {' '}{adRate != null
+                ? <>This store's default ad rate is <span className="font-semibold">{adRate}%</span>{autoPromote ? '' : ' (auto-promote is currently off)'}, so e.g. 13.25% final value fee + {adRate}% ad rate = {Math.round((13.25 + adRate) * 100) / 100}%.</>
+                : <>No default ad rate is saved for this store (Promoted Listings below).</>}
+            </p>
+            <p>The presets fill in eBay's fee only — add your ad rate on top if you promote listings. This is not the profit margin; profit is set in the tiers below.</p>
+          </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <label className="label">Percentage fee (%)
-            <input className="input mt-1" value={pctFee} onChange={e => setPctFee(e.target.value)} />
+          <label className="label">Percentage fee (%) — final value fee + ad rate
+            <input className="input mt-1" inputMode="decimal" value={pctFee} onChange={e => setPctFee(e.target.value)} />
           </label>
-          <label className="label">Fixed fee ($)
-            <input className="input mt-1" value={fixedFee} onChange={e => setFixedFee(e.target.value)} />
+          <label className="label">Fixed fee per order ($)
+            <input className="input mt-1" inputMode="decimal" value={fixedFee} onChange={e => setFixedFee(e.target.value)} />
           </label>
         </div>
+        {adRateNotCovered && (
+          <p className="mt-2 text-xs text-error-600">The percentage fee ({pctFeeNumber}%) is lower than the ad rate ({adRate}%) — promoted sales will not cover eBay's fees.</p>
+        )}
       </div>
 
       <div>
@@ -768,103 +1062,159 @@ function PricingSection() {
             <Plus className="h-3.5 w-3.5" /> Add tier
           </button>
         </div>
+        <p className="text-xs text-slate-500 mb-2">
+          A tier applies to Amazon prices from <span className="font-medium">Min (included)</span> up to but <span className="font-medium">not including Max</span> — e.g. 0–25 and 25–100: a $25.00 item uses the second tier.
+          The first tier must start at 0 and each tier's Min must equal the previous tier's Max (no gaps or overlaps). Prices at or above the last tier's Max use the last tier.
+        </p>
+        <div className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 mb-1 text-[11px] font-medium text-slate-500">
+          <span>Min $ (incl.)</span><span>Max $ (excl.)</span><span>Profit %</span><span>Fixed profit $</span><span className="w-4" />
+        </div>
         <div className="space-y-2">
           {tiers.map(t => (
             <div key={t.id} className="grid grid-cols-[1fr_1fr_1fr_1fr_auto] gap-2 items-center">
-              <input className="input text-sm" placeholder="Min $" value={t.min} onChange={e => updateTier(t.id, 'min', e.target.value)} />
-              <input className="input text-sm" placeholder="Max $" value={t.max} onChange={e => updateTier(t.id, 'max', e.target.value)} />
-              <input className="input text-sm" placeholder="Profit %" value={t.profitPct} onChange={e => updateTier(t.id, 'profitPct', e.target.value)} />
-              <input className="input text-sm" placeholder="Fixed +$" value={t.fixProfit} onChange={e => updateTier(t.id, 'fixProfit', e.target.value)} />
-              <button onClick={() => removeTier(t.id)} className="text-slate-300 hover:text-error-600"><Trash2 className="h-4 w-4" /></button>
+              <input className="input text-sm" inputMode="decimal" placeholder="Min $" value={t.min} onChange={e => updateTier(t.id, 'min', e.target.value)} />
+              <input className="input text-sm" inputMode="decimal" placeholder="Max $" value={t.max} onChange={e => updateTier(t.id, 'max', e.target.value)} />
+              <input className="input text-sm" inputMode="decimal" placeholder="Profit %" value={t.profitPct} onChange={e => updateTier(t.id, 'profitPct', e.target.value)} />
+              <input className="input text-sm" inputMode="decimal" placeholder="Fixed +$" value={t.fixProfit} onChange={e => updateTier(t.id, 'fixProfit', e.target.value)} />
+              <button onClick={() => removeTier(t.id)} className="text-slate-300 hover:text-error-600" title="Remove tier"><Trash2 className="h-4 w-4" /></button>
             </div>
           ))}
+          {tiers.length === 0 && (
+            <p className="rounded-lg border border-dashed border-slate-300 px-3 py-3 text-xs text-slate-500">
+              No tiers saved for this store — the eBay price currently equals the Amazon price. Add at least one tier (e.g. 0 – 999999) to save.
+            </p>
+          )}
         </div>
       </div>
 
-      {previewPrice && (
+      {preview && (
         <div className="rounded-lg bg-slate-50 border border-slate-200 px-4 py-3 text-sm">
-          <p className="text-slate-500 text-xs mb-1">Preview: a $50.00 Amazon item becomes</p>
-          <p className="font-semibold text-slate-900">{formatCurrency(previewPrice.finalPrice)} on eBay</p>
+          <p className="text-slate-500 text-xs mb-1">Preview: a {formatCurrency(sampleCost)} Amazon item becomes</p>
+          <p className="font-semibold text-slate-900">{formatCurrency(preview.sale)} on eBay</p>
+          <dl className="mt-2 grid max-w-sm grid-cols-[1fr_auto] gap-x-6 gap-y-0.5 text-xs">
+            <dt className="text-slate-500">Sale price</dt><dd className="text-right text-slate-900">{formatCurrency(preview.sale)}</dd>
+            <dt className="text-slate-500">eBay fees ({Math.round(preview.ebayPctShare * 100) / 100}% + {formatCurrency(validation.ok ? validation.fixedFee : 0)})</dt><dd className="text-right text-slate-900">−{formatCurrency(preview.ebayFees)}</dd>
+            <dt className="text-slate-500">Ad fee ({preview.effectiveAdRate}%{autoPromote ? '' : ', auto-promote off'})</dt><dd className="text-right text-slate-900">−{formatCurrency(preview.adFee)}</dd>
+            <dt className="text-slate-500">Amazon cost</dt><dd className="text-right text-slate-900">−{formatCurrency(sampleCost)}</dd>
+            <dt className="border-t border-slate-200 pt-0.5 font-medium text-slate-700">Net profit</dt>
+            <dd className={cn('border-t border-slate-200 pt-0.5 text-right font-semibold', preview.net >= 0 ? 'text-success-700' : 'text-error-600')}>{formatCurrency(preview.net)}</dd>
+          </dl>
+          <p className="mt-1 text-[11px] text-slate-400">Excludes sales tax and Amazon tax (see Filters → Apply estimated tax).</p>
         </div>
       )}
 
-      <div className="flex items-center gap-3">
-        <button className="btn-primary" onClick={() => void saveAll()} disabled={saving}>
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn-primary" onClick={() => void saveAll()} disabled={saving || !validation.ok}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save pricing'}
         </button>
-        {message && <span className="flex items-center gap-1 text-sm text-success-600"><CheckCircle2 className="h-4 w-4" /> {message}</span>}
-        {error && <span className="text-sm text-error-600">{error}</span>}
+        {!validation.ok && <span className="text-xs text-error-600">{validation.error}</span>}
+        <NoticeText notice={notice} />
       </div>
     </div>
   )
 }
 
-function AvailabilitySection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+// Backend (amazon-fetch) behaviour when a store has NO store_availability_settings row.
+const AVAILABILITY_DEFAULTS = { defaultQuantity: '1', primeFilter: false, allowOutOfStock: true, allowDuplicateAsins: true }
 
-  const [defaultQuantity, setDefaultQuantity] = useState('1')
-  const [primeFilter, setPrimeFilter] = useState(false)
-  const [allowOutOfStock, setAllowOutOfStock] = useState(true)
-  const [allowDuplicateAsins, setAllowDuplicateAsins] = useState(true)
+function AvailabilitySection() {
+  const { activeStore } = useActiveStore()
+
+  const [defaultQuantity, setDefaultQuantity] = useState(AVAILABILITY_DEFAULTS.defaultQuantity)
+  const [primeFilter, setPrimeFilter] = useState(AVAILABILITY_DEFAULTS.primeFilter)
+  const [allowOutOfStock, setAllowOutOfStock] = useState(AVAILABILITY_DEFAULTS.allowOutOfStock)
+  const [allowDuplicateAsins, setAllowDuplicateAsins] = useState(AVAILABILITY_DEFAULTS.allowDuplicateAsins)
+  const [hasRow, setHasRow] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
+    setNotice(null)
     async function load() {
-      const { data } = await supabase.from('store_availability_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
-      if (cancelled) return
-      if (data) {
-        setDefaultQuantity(String(data.default_quantity ?? '1'))
-        setPrimeFilter(!!data.prime_filter)
-        setAllowOutOfStock(data.allow_out_of_stock ?? true)
-        setAllowDuplicateAsins(data.allow_duplicate_asins ?? true)
+      try {
+        const { data, error } = await supabase
+          .from('store_availability_settings')
+          .select('default_quantity, prime_filter, allow_out_of_stock, allow_duplicate_asins')
+          .eq('store_id', storeId)
+          .maybeSingle()
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        if (data) {
+          setHasRow(true)
+          setDefaultQuantity(data.default_quantity != null ? String(data.default_quantity) : AVAILABILITY_DEFAULTS.defaultQuantity)
+          setPrimeFilter(!!data.prime_filter)
+          setAllowOutOfStock(data.allow_out_of_stock ?? AVAILABILITY_DEFAULTS.allowOutOfStock)
+          setAllowDuplicateAsins(data.allow_duplicate_asins ?? AVAILABILITY_DEFAULTS.allowDuplicateAsins)
+        } else {
+          setHasRow(false)
+          setDefaultQuantity(AVAILABILITY_DEFAULTS.defaultQuantity)
+          setPrimeFilter(AVAILABILITY_DEFAULTS.primeFilter)
+          setAllowOutOfStock(AVAILABILITY_DEFAULTS.allowOutOfStock)
+          setAllowDuplicateAsins(AVAILABILITY_DEFAULTS.allowDuplicateAsins)
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load availability settings'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   async function save() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
+    setNotice(null)
+    const qty = parseNumberInput(defaultQuantity)
+    if (qty === null || !Number.isInteger(qty) || qty < 1) {
+      setNotice({ type: 'error', text: 'Default quantity must be a whole number of at least 1.' })
+      return
+    }
     setSaving(true)
-    setMessage(null)
     try {
       const { error } = await supabase.from('store_availability_settings').upsert({
         store_id: activeStore.id,
-        default_quantity: Number(defaultQuantity) || 1,
+        default_quantity: qty,
         prime_filter: primeFilter,
         allow_out_of_stock: allowOutOfStock,
         allow_duplicate_asins: allowDuplicateAsins,
       }, { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage('Availability settings saved.')
+      setHasRow(true)
+      setNotice({ type: 'success', text: 'Availability settings saved.' })
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to save')
+      setNotice({ type: 'error', text: errorText(err, 'Failed to save') })
     } finally {
       setSaving(false)
     }
   }
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="space-y-5">
+      {!hasRow && (
+        <p className="text-xs text-slate-500">Nothing saved for this store yet — showing what the server uses without saved settings.</p>
+      )}
       <label className="label">Default quantity for new listings
-        <input className="input mt-1 max-w-xs" value={defaultQuantity} onChange={e => setDefaultQuantity(e.target.value)} />
+        <input className="input mt-1 max-w-xs" inputMode="numeric" value={defaultQuantity} onChange={e => setDefaultQuantity(e.target.value)} />
       </label>
 
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-slate-900">Prime filter</p>
           <p className="text-xs text-slate-500">Only list products that are Prime/Fulfilled-by-Amazon.</p>
+          <p className="text-xs text-slate-400">Note: this runs the same Prime/FBA check as "Accept only FBA offers" in the Filters tab — turning on either one has the same effect.</p>
         </div>
         <Toggle checked={primeFilter} onChange={setPrimeFilter} />
       </div>
@@ -885,65 +1235,90 @@ function AvailabilitySection() {
         <Toggle checked={allowDuplicateAsins} onChange={setAllowDuplicateAsins} />
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <button className="btn-primary" onClick={() => void save()} disabled={saving}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save'}
         </button>
-        {message && <span className="text-sm text-success-600">{message}</span>}
+        <NoticeText notice={notice} />
       </div>
     </div>
   )
 }
 
-function PromotedSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+// Used when a store has NO store_promoted_settings row (same fallbacks as the listing pages).
+const PROMOTED_DEFAULTS = { autoPromote: false, adRate: '3' }
 
-  const [autoPromote, setAutoPromote] = useState(false)
-  const [adRate, setAdRate] = useState('3')
+function PromotedSection() {
+  const { activeStore } = useActiveStore()
+
+  const [autoPromote, setAutoPromote] = useState(PROMOTED_DEFAULTS.autoPromote)
+  const [adRate, setAdRate] = useState(PROMOTED_DEFAULTS.adRate)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
+    setNotice(null)
     async function load() {
-      const { data } = await supabase.from('store_promoted_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
-      if (cancelled) return
-      if (data) {
-        setAutoPromote(data.auto_promote_enabled ?? false)
-        setAdRate(String(data.default_ad_rate ?? '3'))
+      try {
+        const { data, error } = await supabase
+          .from('store_promoted_settings')
+          .select('auto_promote_enabled, default_ad_rate')
+          .eq('store_id', storeId)
+          .maybeSingle()
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        if (data) {
+          setAutoPromote(data.auto_promote_enabled ?? PROMOTED_DEFAULTS.autoPromote)
+          setAdRate(data.default_ad_rate != null ? String(data.default_ad_rate) : PROMOTED_DEFAULTS.adRate)
+        } else {
+          setAutoPromote(PROMOTED_DEFAULTS.autoPromote)
+          setAdRate(PROMOTED_DEFAULTS.adRate)
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load Promoted Listings settings'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   async function save() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
+    setNotice(null)
+    const rate = parseNumberInput(adRate)
+    if (rate === null || rate < 0 || rate >= 100) {
+      setNotice({ type: 'error', text: 'Ad rate must be a number from 0 to below 100.' })
+      return
+    }
     setSaving(true)
-    setMessage(null)
     try {
       const { error } = await supabase.from('store_promoted_settings').upsert({
         store_id: activeStore.id,
         auto_promote_enabled: autoPromote,
-        default_ad_rate: Number(adRate) || 3,
+        default_ad_rate: rate,
       }, { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage('Promoted Listings settings saved.')
+      setNotice({ type: 'success', text: 'Promoted Listings settings saved.' })
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to save')
+      setNotice({ type: 'error', text: errorText(err, 'Failed to save') })
     } finally {
       setSaving(false)
     }
   }
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="space-y-5">
@@ -955,59 +1330,106 @@ function PromotedSection() {
         <Toggle checked={autoPromote} onChange={setAutoPromote} />
       </div>
       <label className="label">Default ad rate (%)
-        <input className="input mt-1 max-w-xs" value={adRate} onChange={e => setAdRate(e.target.value)} />
+        <input className="input mt-1 max-w-xs" inputMode="decimal" value={adRate} onChange={e => setAdRate(e.target.value)} />
       </label>
-      <div className="flex items-center gap-3">
+      <p className="text-xs text-slate-500">Remember to include this ad rate in the percentage fee under Profit &amp; fees, otherwise the ad fee comes out of your profit.</p>
+      <div className="flex flex-wrap items-center gap-3">
         <button className="btn-primary" onClick={() => void save()} disabled={saving}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save'}
         </button>
-        {message && <span className="text-sm text-success-600">{message}</span>}
+        <NoticeText notice={notice} />
       </div>
     </div>
   )
 }
 
+// Backend (amazon-fetch ~new2.ts:1262-1275) when a store has a row but a column is null:
+// block_in_* ?? true, auto_remove_brand / auto_replace_brand ?? false. With NO row at all
+// nothing is removed or blocked (empty lists, brand options off).
+const VERO_DEFAULTS = { blockInBrand: true, blockInTitle: true, blockInDescription: true, autoRemoveBrand: false, autoReplaceBrand: false }
+
+type VeroRow = {
+  store_id: string
+  remove_keywords: string[] | null
+  block_keywords: string[] | null
+  block_asins: string[] | null
+  block_in_brand: boolean | null
+  block_in_title: boolean | null
+  block_in_description: boolean | null
+  auto_remove_brand: boolean | null
+  auto_replace_brand: boolean | null
+}
+
+// Union of two word lists, case-insensitive dedupe, keeps the first spelling seen.
+function mergeWordLists(existing: string[] | null | undefined, incoming: string[], normalize: (w: string) => string = w => w.trim()): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of [...(existing || []), ...incoming]) {
+    const word = normalize(String(raw ?? ''))
+    if (!word) continue
+    const key = word.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(word)
+  }
+  return out
+}
+
 function VeroSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  const { connectedStores, activeStore } = useActiveStore()
 
   const [removeKeywords, setRemoveKeywords] = useState<string[]>([])
   const [blockKeywords, setBlockKeywords] = useState<string[]>([])
   const [blockAsins, setBlockAsins] = useState<string[]>([])
-  const [blockInBrand, setBlockInBrand] = useState(true)
-  const [blockInTitle, setBlockInTitle] = useState(true)
-  const [blockInDescription, setBlockInDescription] = useState(true)
-  const [autoRemoveBrand, setAutoRemoveBrand] = useState(true)
-  const [autoReplaceBrand, setAutoReplaceBrand] = useState(true)
+  const [blockInBrand, setBlockInBrand] = useState(VERO_DEFAULTS.blockInBrand)
+  const [blockInTitle, setBlockInTitle] = useState(VERO_DEFAULTS.blockInTitle)
+  const [blockInDescription, setBlockInDescription] = useState(VERO_DEFAULTS.blockInDescription)
+  const [autoRemoveBrand, setAutoRemoveBrand] = useState(VERO_DEFAULTS.autoRemoveBrand)
+  const [autoReplaceBrand, setAutoReplaceBrand] = useState(VERO_DEFAULTS.autoReplaceBrand)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
   const [copying, setCopying] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [confirmCopyOpen, setConfirmCopyOpen] = useState(false)
+  const [copyOptionsToo, setCopyOptionsToo] = useState(false)
+  const [message, setMessage] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
     setMessage(null)
     async function load() {
-      const { data, error } = await supabase.from('store_vero_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
-      if (cancelled) return
-      if (error) setMessage({ type: 'error', text: `Failed to load: ${error.message}` })
-      setRemoveKeywords((data?.remove_keywords as string[]) || [])
-      setBlockKeywords((data?.block_keywords as string[]) || [])
-      setBlockAsins((data?.block_asins as string[]) || [])
-      setBlockInBrand(data?.block_in_brand ?? true)
-      setBlockInTitle(data?.block_in_title ?? true)
-      setBlockInDescription(data?.block_in_description ?? true)
-      setAutoRemoveBrand(data?.auto_remove_brand ?? true)
-      setAutoReplaceBrand(data?.auto_replace_brand ?? true)
-      setLoading(false)
+      try {
+        const { data, error } = await supabase
+          .from('store_vero_settings')
+          .select('remove_keywords, block_keywords, block_asins, block_in_brand, block_in_title, block_in_description, auto_remove_brand, auto_replace_brand')
+          .eq('store_id', storeId)
+          .maybeSingle()
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        const row = data as Omit<VeroRow, 'store_id'> | null
+        setRemoveKeywords(row?.remove_keywords || [])
+        setBlockKeywords(row?.block_keywords || [])
+        setBlockAsins(row?.block_asins || [])
+        setBlockInBrand(row?.block_in_brand ?? VERO_DEFAULTS.blockInBrand)
+        setBlockInTitle(row?.block_in_title ?? VERO_DEFAULTS.blockInTitle)
+        setBlockInDescription(row?.block_in_description ?? VERO_DEFAULTS.blockInDescription)
+        setAutoRemoveBrand(row?.auto_remove_brand ?? VERO_DEFAULTS.autoRemoveBrand)
+        setAutoReplaceBrand(row?.auto_replace_brand ?? VERO_DEFAULTS.autoReplaceBrand)
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load VeRO settings'))
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   function buildPayload(storeId: string) {
     return {
@@ -1025,7 +1447,7 @@ function VeroSection() {
   }
 
   async function save() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
     setSaving(true)
     setMessage(null)
     try {
@@ -1039,26 +1461,63 @@ function VeroSection() {
     }
   }
 
-  async function copyToAllStores() {
-    if (!activeStore?.id) return
-    const others = connectedStores.filter(s => s.id !== activeStore.id)
-    if (others.length === 0) {
+  const otherStores = connectedStores.filter(s => s.id !== activeStore?.id)
+
+  function requestCopyToAllStores() {
+    setMessage(null)
+    if (otherStores.length === 0) {
       setMessage({ type: 'error', text: 'No other connected stores to copy to.' })
       return
     }
+    setCopyOptionsToo(false)
+    setConfirmCopyOpen(true)
+  }
+
+  // MERGES this store's lists into every other store (union, case-insensitive) — never removes
+  // words another store already has. On/off options are only copied when explicitly ticked
+  // (or when the other store has no VeRO settings yet).
+  async function copyToAllStores() {
+    if (!activeStore?.id || otherStores.length === 0) return
     setCopying(true)
     setMessage(null)
     try {
-      const { error } = await supabase.from('store_vero_settings').upsert(others.map(s => buildPayload(s.id)), { onConflict: 'store_id' })
+      const ids = otherStores.map(s => s.id)
+      const { data: existingRows, error: readErr } = await supabase
+        .from('store_vero_settings')
+        .select('store_id, remove_keywords, block_keywords, block_asins, block_in_brand, block_in_title, block_in_description, auto_remove_brand, auto_replace_brand')
+        .in('store_id', ids)
+      if (readErr) throw new Error(`Could not read the other stores' settings: ${readErr.message}`)
+      const byStore = new Map<string, VeroRow>(((existingRows || []) as VeroRow[]).map(r => [String(r.store_id), r]))
+      const asinNormalize = (w: string) => w.trim().toUpperCase()
+      const payloads = otherStores.map(store => {
+        const existing = byStore.get(store.id)
+        const useMine = copyOptionsToo || !existing
+        return {
+          store_id: store.id,
+          remove_keywords: mergeWordLists(existing?.remove_keywords, removeKeywords),
+          block_keywords: mergeWordLists(existing?.block_keywords, blockKeywords),
+          block_asins: mergeWordLists(existing?.block_asins, blockAsins, asinNormalize),
+          block_in_brand: useMine ? blockInBrand : (existing?.block_in_brand ?? VERO_DEFAULTS.blockInBrand),
+          block_in_title: useMine ? blockInTitle : (existing?.block_in_title ?? VERO_DEFAULTS.blockInTitle),
+          block_in_description: useMine ? blockInDescription : (existing?.block_in_description ?? VERO_DEFAULTS.blockInDescription),
+          auto_remove_brand: useMine ? autoRemoveBrand : (existing?.auto_remove_brand ?? VERO_DEFAULTS.autoRemoveBrand),
+          auto_replace_brand: useMine ? autoReplaceBrand : (existing?.auto_replace_brand ?? VERO_DEFAULTS.autoReplaceBrand),
+          updated_at: new Date().toISOString(),
+        }
+      })
+      const { error } = await supabase.from('store_vero_settings').upsert(payloads, { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage({ type: 'success', text: `Copied to ${others.length} other store${others.length === 1 ? '' : 's'}.` })
+      setConfirmCopyOpen(false)
+      setMessage({ type: 'success', text: `Merged into ${otherStores.length} other store${otherStores.length === 1 ? '' : 's'}.` })
     } catch (err) {
+      setConfirmCopyOpen(false)
       setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to copy' })
     } finally {
       setCopying(false)
     }
   }
 
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
 
   return (
@@ -1134,16 +1593,32 @@ function VeroSection() {
           </button>
           <button
             className="text-sm font-medium text-brand-600 underline hover:text-brand-700 disabled:opacity-50"
-            onClick={() => void copyToAllStores()}
+            onClick={requestCopyToAllStores}
             disabled={copying || connectedStores.length < 2}
           >
             {copying ? 'Copying…' : 'Copy to all stores'}
           </button>
-          {message && (
-            <span className={cn('text-sm', message.type === 'success' ? 'text-success-600' : 'text-error-600')}>{message.text}</span>
-          )}
+          <NoticeText notice={message} />
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmCopyOpen}
+        title="Copy VeRO lists to all other stores?"
+        confirmLabel={copying ? 'Copying…' : `Merge into ${otherStores.length} store${otherStores.length === 1 ? '' : 's'}`}
+        busy={copying}
+        onCancel={() => setConfirmCopyOpen(false)}
+        onConfirm={() => void copyToAllStores()}
+      >
+        <p>
+          The three word lists shown here ({removeKeywords.length} remove keywords, {blockKeywords.length} block keywords, {blockAsins.length} blocked ASINs — including unsaved changes)
+          will be <span className="font-medium text-slate-900">merged</span> into: {otherStores.map(s => storeLabel(s)).join(', ')}.
+        </p>
+        <p>Words those stores already have are kept; duplicates are skipped (case-insensitive). Nothing is removed.</p>
+        <label className="flex items-start gap-2 pt-1">
+          <input type="checkbox" className="mt-0.5" checked={copyOptionsToo} onChange={e => setCopyOptionsToo(e.target.checked)} />
+          <span>Also overwrite their on/off options (block in brand/title/description, auto-remove/replace brand) with this store's.</span>
+        </label>
+      </ConfirmDialog>
     </div>
   )
 }
@@ -1304,9 +1779,7 @@ function VeroPill({ checked, onChange, label }: { checked: boolean; onChange: (v
 type TemplateRow = { id: string; name: string; template: string; is_active: boolean }
 
 function ListingTemplateSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  const { connectedStores, activeStore } = useActiveStore()
   const activeStoreName = activeStore?.ebayUsername || activeStore?.nickname || 'Our Store'
 
   const [templates, setTemplates] = useState<TemplateRow[]>([])
@@ -1316,6 +1789,9 @@ function ListingTemplateSection() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [copying, setCopying] = useState(false)
+  const [confirmCopyOpen, setConfirmCopyOpen] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [settingActiveId, setSettingActiveId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
@@ -1340,37 +1816,45 @@ function ListingTemplateSection() {
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
     async function load() {
-      const { data, error } = await supabase
-        .from('listing_templates')
-        .select('id, name, template, is_active')
-        .eq('store_id', activeStore!.id)
-        .order('created_at', { ascending: true })
-      if (cancelled) return
-      if (error) {
-        setToast({ type: 'error', msg: 'Failed to load your templates.' })
-        setLoading(false)
-        return
+      try {
+        const { data, error } = await supabase
+          .from('listing_templates')
+          .select('id, name, template, is_active')
+          .eq('store_id', storeId)
+          .order('created_at', { ascending: true })
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        const rows = (data || []) as TemplateRow[]
+        setTemplates(rows)
+        if (rows.length > 0) {
+          const active = rows.find(r => r.is_active) || rows[0]
+          setSelectedId(active.id)
+          setDraftName(active.name)
+          setDraftTemplate(active.template)
+        } else {
+          setSelectedId('new')
+          setDraftName('Template 1')
+          setDraftTemplate(DEFAULT_LISTING_TEMPLATE)
+        }
+      } catch (err) {
+        if (!cancelled) {
+          // Don't let the user "save as new" over a list we failed to read (it would also make
+          // a second active template). Saving is blocked until the retry succeeds.
+          setTemplates([])
+          setLoadError(errorText(err, 'Failed to load your templates.'))
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      const rows = (data || []) as TemplateRow[]
-      setTemplates(rows)
-      if (rows.length > 0) {
-        const active = rows.find(r => r.is_active) || rows[0]
-        setSelectedId(active.id)
-        setDraftName(active.name)
-        setDraftTemplate(active.template)
-      } else {
-        setSelectedId('new')
-        setDraftName('Template 1')
-        setDraftTemplate(DEFAULT_LISTING_TEMPLATE)
-      }
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   function selectTemplate(row: TemplateRow) {
     setSelectedId(row.id)
@@ -1398,7 +1882,7 @@ function ListingTemplateSection() {
   }
 
   async function saveTemplate() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
     setSaving(true)
     setToast(null)
     try {
@@ -1441,45 +1925,47 @@ function ListingTemplateSection() {
     }
   }
 
-  // Pushes the CURRENTLY EDITED template's content to every other connected store: if that
-  // store already has an active template, its content is overwritten (its own name is left
-  // untouched); if the store has no templates at all yet, a new one is created for it, named
-  // and set active immediately so that store always ends up with a usable active template too.
-  async function copyToAllStores() {
-    if (!activeStore?.id) return
-    const others = connectedStores.filter(s => s.id !== activeStore.id)
-    if (others.length === 0) {
+  const otherStores = connectedStores.filter(s => s.id !== activeStore?.id)
+
+  function requestCopyToAllStores() {
+    if (otherStores.length === 0) {
       setToast({ type: 'error', msg: 'No other connected stores to copy to.' })
       return
     }
+    setConfirmCopyOpen(true)
+  }
+
+  // Pushes the CURRENTLY EDITED template's content to every other connected store (after the
+  // in-app confirmation): every ACTIVE template of that store gets this content (its own name is
+  // left untouched — and if a store somehow has several active rows, all of them are updated
+  // rather than erroring and inserting a duplicate); if the store has no active template, a new
+  // one is created for it and set active so that store always ends up with a usable template.
+  async function copyToAllStores() {
+    if (!activeStore?.id || otherStores.length === 0) return
     setCopying(true)
     setToast(null)
     try {
-      for (const store of others) {
-        const { data: existingActive } = await supabase
+      for (const store of otherStores) {
+        const { data: updatedRows, error: updateErr } = await supabase
           .from('listing_templates')
-          .select('id')
+          .update({ template: draftTemplate, updated_at: new Date().toISOString() })
           .eq('store_id', store.id)
           .eq('is_active', true)
-          .maybeSingle()
-        if (existingActive?.id) {
-          const { error } = await supabase
-            .from('listing_templates')
-            .update({ template: draftTemplate, updated_at: new Date().toISOString() })
-            .eq('id', existingActive.id)
-          if (error) throw new Error(error.message)
-        } else {
+          .select('id')
+        if (updateErr) throw new Error(`${storeLabel(store)}: ${updateErr.message}`)
+        if (!updatedRows || updatedRows.length === 0) {
           const { error } = await supabase
             .from('listing_templates')
             .insert({ store_id: store.id, name: draftName.trim() || 'Template 1', template: draftTemplate, is_active: true })
-          if (error) throw new Error(error.message)
+          if (error) throw new Error(`${storeLabel(store)}: ${error.message}`)
         }
       }
-      setToast({ type: 'success', msg: `Copied to ${others.length} other store${others.length === 1 ? '' : 's'} as their active template.` })
+      setToast({ type: 'success', msg: `Copied to ${otherStores.length} other store${otherStores.length === 1 ? '' : 's'} as their active template.` })
     } catch (err) {
       setToast({ type: 'error', msg: err instanceof Error ? err.message : 'Failed to copy to other stores.' })
     } finally {
       setCopying(false)
+      setConfirmCopyOpen(false)
     }
   }
 
@@ -1563,6 +2049,7 @@ function ListingTemplateSection() {
         </div>
       </div>
       <div className="card-body space-y-5">
+        {loadError && <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />}
         <div className="flex items-center gap-2 flex-wrap">
           <select
             className="input flex-1 min-w-[220px] max-w-sm"
@@ -1648,15 +2135,31 @@ function ListingTemplateSection() {
         </div>
 
         <div className="flex items-center gap-3 pt-1">
-          <button className="btn-primary" onClick={() => void saveTemplate()} disabled={saving || loading}>
+          <button className="btn-primary" onClick={() => void saveTemplate()} disabled={saving || loading || !!loadError}>
             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             {saving ? 'Saving…' : isNew ? 'Save as new template' : 'Save'}
           </button>
-          <button className="text-sm text-brand-600 hover:text-brand-700 font-medium" onClick={() => void copyToAllStores()} disabled={copying || connectedStores.length < 2}>
+          <button className="text-sm text-brand-600 hover:text-brand-700 font-medium" onClick={requestCopyToAllStores} disabled={copying || connectedStores.length < 2 || !!loadError}>
             {copying ? 'Copying…' : 'Copy to all stores'}
           </button>
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmCopyOpen}
+        title="Overwrite the active template of other stores?"
+        confirmLabel={copying ? 'Copying…' : 'Overwrite'}
+        danger
+        busy={copying}
+        onCancel={() => setConfirmCopyOpen(false)}
+        onConfirm={() => void copyToAllStores()}
+      >
+        <p>
+          The template in the editor (including unsaved changes) will <span className="font-medium text-slate-900">replace the content of the active template</span> of:
+          {' '}{otherStores.map(s => storeLabel(s)).join(', ')}.
+        </p>
+        <p>Their current template HTML is not kept anywhere — copy it first if you may need it. Stores without an active template get a new one.</p>
+      </ConfirmDialog>
 
       {toast && (
         <div className={cn(
@@ -1679,38 +2182,49 @@ const MESSAGE_TRIGGERS = [
 ]
 
 function MessagesSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+  const { activeStore } = useActiveStore()
 
   const [messages, setMessages] = useState<Record<string, { enabled: boolean; text: string }>>({})
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
+    setNotice(null)
     async function load() {
-      const { data } = await supabase.from('store_auto_messages').select('*').eq('store_id', activeStore!.id)
-      if (cancelled) return
-      const map: Record<string, { enabled: boolean; text: string }> = {}
-      for (const trigger of MESSAGE_TRIGGERS) {
-        const row = data?.find(r => r.trigger === trigger.id)
-        map[trigger.id] = { enabled: row?.enabled ?? false, text: row?.message_text ?? '' }
+      try {
+        const { data, error } = await supabase.from('store_auto_messages').select('*').eq('store_id', storeId)
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        const rows = (data || []) as Array<{ trigger: string; enabled: boolean | null; message_text: string | null }>
+        const map: Record<string, { enabled: boolean; text: string }> = {}
+        for (const trigger of MESSAGE_TRIGGERS) {
+          const row = rows.find(r => r.trigger === trigger.id)
+          map[trigger.id] = { enabled: row?.enabled ?? false, text: row?.message_text ?? '' }
+        }
+        setMessages(map)
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load auto messages'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setMessages(map)
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
+  }, [activeStore?.id, reloadKey])
 
   async function save() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
     setSaving(true)
-    setMessage(null)
+    setNotice(null)
+    let savedCount = 0
     try {
       for (const trigger of MESSAGE_TRIGGERS) {
         const row = messages[trigger.id]
@@ -1720,17 +2234,20 @@ function MessagesSection() {
           enabled: row?.enabled ?? false,
           message_text: row?.text ?? '',
         }, { onConflict: 'store_id,trigger' })
-        if (error) throw new Error(error.message)
+        if (error) throw new Error(`"${trigger.label}" not saved: ${error.message}`)
+        savedCount++
       }
-      setMessage('Auto messages saved.')
+      setNotice({ type: 'success', text: 'Auto messages saved.' })
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to save')
+      const base = errorText(err, 'Failed to save')
+      setNotice({ type: 'error', text: savedCount > 0 ? `${base} (${savedCount} of ${MESSAGE_TRIGGERS.length} saved before the error)` : base })
     } finally {
       setSaving(false)
     }
   }
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="space-y-3">
@@ -1756,12 +2273,12 @@ function MessagesSection() {
           </div>
         </SettingsAccordion>
       ))}
-      <div className="flex items-center gap-3 pt-2">
+      <div className="flex flex-wrap items-center gap-3 pt-2">
         <button className="btn-primary" onClick={() => void save()} disabled={saving}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
           {saving ? 'Saving…' : 'Save all messages'}
         </button>
-        {message && <span className="text-sm text-success-600">{message}</span>}
+        <NoticeText notice={notice} />
       </div>
     </div>
   )
@@ -1769,77 +2286,107 @@ function MessagesSection() {
 
 const SHIPPING_RANGES = ['0-2 days', '3-7 days', '8-13 days', '14 or more days']
 
-function AmazonFiltersSection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const activeStore = connectedStores.find(s => s.active) || connectedStores[0]
+// Backend (amazon-fetch) with NO filter_settings row: no filters at all.
+const FILTER_DEFAULTS = { minRating: '', minReviewCount: '', fbaOnly: false, shippingRanges: [] as string[], applyTax: false }
 
-  const [minRating, setMinRating] = useState('')
-  const [minReviewCount, setMinReviewCount] = useState('')
-  const [fbaOnly, setFbaOnly] = useState(false)
-  const [shippingRanges, setShippingRanges] = useState<string[]>([])
-  const [applyTax, setApplyTax] = useState(false)
+function AmazonFiltersSection() {
+  const { activeStore } = useActiveStore()
+
+  const [minRating, setMinRating] = useState(FILTER_DEFAULTS.minRating)
+  const [minReviewCount, setMinReviewCount] = useState(FILTER_DEFAULTS.minReviewCount)
+  const [fbaOnly, setFbaOnly] = useState(FILTER_DEFAULTS.fbaOnly)
+  // Kept and saved back unchanged — the shipping-time filter is currently not applied (see below).
+  const [shippingRanges, setShippingRanges] = useState<string[]>(FILTER_DEFAULTS.shippingRanges)
+  const [applyTax, setApplyTax] = useState(FILTER_DEFAULTS.applyTax)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
     if (!activeStore?.id) return
+    const storeId = activeStore.id
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
+    setNotice(null)
     async function load() {
-      const { data } = await supabase.from('filter_settings').select('*').eq('store_id', activeStore!.id).maybeSingle()
-      if (cancelled) return
-      if (data) {
-        setMinRating(data.min_rating != null ? String(data.min_rating) : '')
-        setMinReviewCount(data.min_review_count != null ? String(data.min_review_count) : '')
-        setFbaOnly(!!data.fba_only)
-        setShippingRanges((data.shipping_time_ranges as string[]) || [])
-        setApplyTax(!!data.apply_tax)
+      try {
+        const { data, error } = await supabase
+          .from('filter_settings')
+          .select('min_rating, min_review_count, fba_only, shipping_time_ranges, apply_tax')
+          .eq('store_id', storeId)
+          .maybeSingle()
+        if (cancelled) return
+        if (error) throw new Error(error.message)
+        if (data) {
+          setMinRating(data.min_rating != null ? String(data.min_rating) : '')
+          setMinReviewCount(data.min_review_count != null ? String(data.min_review_count) : '')
+          setFbaOnly(!!data.fba_only)
+          setShippingRanges((data.shipping_time_ranges as string[] | null) || [])
+          setApplyTax(!!data.apply_tax)
+        } else {
+          setMinRating(FILTER_DEFAULTS.minRating)
+          setMinReviewCount(FILTER_DEFAULTS.minReviewCount)
+          setFbaOnly(FILTER_DEFAULTS.fbaOnly)
+          setShippingRanges(FILTER_DEFAULTS.shippingRanges)
+          setApplyTax(FILTER_DEFAULTS.applyTax)
+        }
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load filters'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [activeStore?.id])
-
-  function toggleRange(range: string) {
-    setShippingRanges(prev => prev.includes(range) ? prev.filter(r => r !== range) : [...prev, range])
-  }
+  }, [activeStore?.id, reloadKey])
 
   async function save() {
-    if (!activeStore?.id) return
+    if (!activeStore?.id || loadError) return
+    setNotice(null)
+    const rating = minRating.trim() ? parseNumberInput(minRating) : null
+    if (minRating.trim() && (rating === null || rating < 0 || rating > 5)) {
+      setNotice({ type: 'error', text: 'Minimum rating must be a number from 0 to 5 (or empty for no minimum).' })
+      return
+    }
+    const reviews = minReviewCount.trim() ? parseNumberInput(minReviewCount) : null
+    if (minReviewCount.trim() && (reviews === null || reviews < 0 || !Number.isInteger(reviews))) {
+      setNotice({ type: 'error', text: 'Minimum review count must be a whole number (or empty for no minimum).' })
+      return
+    }
     setSaving(true)
-    setMessage(null)
     try {
       const { error } = await supabase.from('filter_settings').upsert({
         store_id: activeStore.id,
-        min_rating: minRating ? Number(minRating) : null,
-        min_review_count: minReviewCount ? Number(minReviewCount) : null,
+        min_rating: rating,
+        min_review_count: reviews,
         fba_only: fbaOnly,
         shipping_time_ranges: shippingRanges,
         apply_tax: applyTax,
       }, { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage('Filters saved.')
+      setNotice({ type: 'success', text: 'Filters saved.' })
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : 'Failed to save')
+      setNotice({ type: 'error', text: errorText(err, 'Failed to save') })
     } finally {
       setSaving(false)
     }
   }
 
   if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="card">
       <div className="card-body space-y-5">
         <div className="grid gap-3 md:grid-cols-2">
           <label className="label">Minimum rating
-            <input className="input mt-1" value={minRating} onChange={e => setMinRating(e.target.value)} placeholder="e.g. 4" />
+            <input className="input mt-1" inputMode="decimal" value={minRating} onChange={e => setMinRating(e.target.value)} placeholder="e.g. 4" />
           </label>
           <label className="label">Minimum review count
-            <input className="input mt-1" value={minReviewCount} onChange={e => setMinReviewCount(e.target.value)} placeholder="e.g. 50" />
+            <input className="input mt-1" inputMode="numeric" value={minReviewCount} onChange={e => setMinReviewCount(e.target.value)} placeholder="e.g. 50" />
           </label>
         </div>
 
@@ -1847,22 +2394,30 @@ function AmazonFiltersSection() {
           <div>
             <p className="text-sm font-medium text-slate-900">Accept only FBA offers</p>
             <p className="text-xs text-slate-500">Skip products that Amazon doesn't fulfill itself.</p>
+            <p className="text-xs text-slate-400">Note: this runs the same Prime/FBA check as the "Prime filter" under General → Availability — turning on either one has the same effect.</p>
           </div>
           <Toggle checked={fbaOnly} onChange={setFbaOnly} />
         </div>
 
         <div>
-          <p className="text-sm font-medium text-slate-900 mb-2">Acceptable shipping time</p>
+          <p className="text-sm font-medium text-slate-900 mb-1">Acceptable shipping time</p>
+          <div className="flex items-start gap-1.5 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 mb-2">
+            <Info className="h-3.5 w-3.5 text-amber-600 shrink-0 mt-0.5" />
+            <p className="text-xs text-amber-700">
+              Currently not applied: the Amazon fetcher does not read delivery times at the moment, so this filter is skipped for every product.
+              Editing is disabled; the saved choice is kept as it is.
+            </p>
+          </div>
           <div className="flex flex-wrap gap-2">
             {SHIPPING_RANGES.map(range => (
-              <button
+              <span
                 key={range}
-                onClick={() => toggleRange(range)}
+                aria-disabled="true"
                 className={cn(
-                  'text-xs px-3 py-1.5 rounded-full border',
-                  shippingRanges.includes(range) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50',
+                  'text-xs px-3 py-1.5 rounded-full border cursor-not-allowed opacity-60',
+                  shippingRanges.includes(range) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'border-slate-200 text-slate-600',
                 )}
-              >{range}</button>
+              >{range}</span>
             ))}
           </div>
         </div>
@@ -1875,45 +2430,23 @@ function AmazonFiltersSection() {
           <Toggle checked={applyTax} onChange={setApplyTax} />
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <button className="btn-primary" onClick={() => void save()} disabled={saving}>
             {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             {saving ? 'Saving…' : 'Save filters'}
           </button>
-          {message && <span className="text-sm text-success-600">{message}</span>}
+          <NoticeText notice={notice} />
         </div>
       </div>
     </div>
   )
 }
 
-function TeamSection() {
-  return (
-    <div className="card">
-      <div className="card-body">
-        <div className="divide-y divide-slate-100">
-          {teamMembers.map(member => (
-            <div key={member.id} className="flex items-center gap-3 py-3">
-              <div className="w-9 h-9 rounded-full bg-brand-100 text-brand-700 flex items-center justify-center text-sm font-semibold shrink-0">
-                {member.name.split(' ').map(n => n[0]).join('')}
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-900 truncate">{member.name}</p>
-                <p className="text-xs text-slate-500">{member.email}</p>
-              </div>
-              <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full">{member.role}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ---- Amazon proxy IPs (per store) ----
-// Each store can have its own proxy list for Amazon price/stock checks. Saved in
-// store_proxy_settings; amazon-fetch reads it. An empty or switched-off list means the store keeps
-// using the default proxy (IPRoyal) exactly as before.
+// ---- Amazon proxy IPs (per store, FALLBACK only) ----
+// Uploads and Amazon checks go through the Webshare proxy IPs configured on the server
+// (AMAZON_PROXIES secret). This per-store list (store_proxy_settings) is only used by
+// amazon-fetch's last-resort direct-scrape path, and only when enabled. Saved credentials are
+// never shown back in full: lines are displayed masked, and the textarea only adds/replaces.
 
 type ProxyProbe = { asin: string; outcome: string; status: number; ms: number; kb: number; location?: string }
 type ProxyTestRow = { proxy: string; scheme: string; ip: string; ipError: string; probes: ProxyProbe[] }
@@ -1951,98 +2484,163 @@ function countValidProxyLines(text: string): { valid: number; invalid: string[] 
   return { valid, invalid }
 }
 
+// Masks the password of one proxy line for display: ip:port:user:•••• , user:••••@ip:port, …
+function maskProxyLine(raw: string): string {
+  const line = raw.trim()
+  const schemeMatch = line.match(/^(https?|socks5h?):\/\//i)
+  const scheme = schemeMatch ? schemeMatch[0] : ''
+  const rest = line.slice(scheme.length)
+  const mask = '••••'
+  if (rest.includes('@')) {
+    const at = rest.lastIndexOf('@')
+    const user = rest.slice(0, at).split(':')[0]
+    return `${scheme}${user}:${mask}@${rest.slice(at + 1)}`
+  }
+  const parts = rest.split(':')
+  if (parts.length === 2) return `${scheme}${rest}`
+  if (parts.length === 4 && !/^\d+$/.test(parts[1]) && /^\d+$/.test(parts[3])) return `${scheme}${parts[0]}:${mask}:${parts[2]}:${parts[3]}`
+  if (parts.length >= 4) return `${scheme}${parts[0]}:${parts[1]}:${parts[2]}:${mask}`
+  if (parts.length === 3) return `${scheme}${parts[0]}:${parts[1]}:${parts[2]}`
+  return line.length > 6 ? `${line.slice(0, 6)}${mask}` : mask
+}
+
+function proxyLines(text: string): string[] {
+  return text.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+}
+
 const PROXY_OUTCOME_LABEL: Record<string, string> = {
   ok: 'OK', captcha: 'CAPTCHA', blocked: 'Blocked', wrong_country: 'Not a US IP', timeout: 'Timeout', error: 'Connection error', not_found: 'Page not found', other: 'Other',
 }
 
 function ProxySection() {
-  const { stores } = useStoreData()
-  const connectedStores = stores.filter(s => s.connected)
-  const [storeId, setStoreId] = useState('')
-  const [proxyText, setProxyText] = useState('')
-  const [enabled, setEnabled] = useState(true)
+  const { connectedStores, activeStore } = useActiveStore()
+  const storeId = activeStore?.id || ''
+  // The saved list (plain text in the DB) is kept only in memory and shown masked.
+  const [savedList, setSavedList] = useState('')
+  const [savedEnabled, setSavedEnabled] = useState(false)
+  const [newText, setNewText] = useState('')
+  const [mode, setMode] = useState<'add' | 'replace'>('add')
+  const [enabled, setEnabled] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadKey, setReloadKey] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [message, setMessage] = useState<Notice>(null)
   const [testing, setTesting] = useState(false)
   const [testProgress, setTestProgress] = useState('')
   const [testRows, setTestRows] = useState<ProxyTestRow[]>([])
   const [testError, setTestError] = useState<string | null>(null)
 
   useEffect(() => {
-    if (!storeId && connectedStores.length > 0) {
-      setStoreId((connectedStores.find(s => s.active) || connectedStores[0]).id)
-    }
-  }, [connectedStores, storeId])
-
-  useEffect(() => {
     if (!storeId) return
     let cancelled = false
     setLoading(true)
+    setLoadError(null)
     setMessage(null)
     setTestRows([])
     setTestError(null)
+    setNewText('')
+    setConfirmClear(false)
     async function load() {
-      const { data, error } = await supabase.from('store_proxy_settings').select('proxy_list, enabled').eq('store_id', storeId).maybeSingle()
-      if (cancelled) return
-      if (error) {
-        setMessage({
-          type: 'error',
-          text: /store_proxy_settings/.test(error.message)
+      try {
+        const { data, error } = await supabase.from('store_proxy_settings').select('proxy_list, enabled').eq('store_id', storeId).maybeSingle()
+        if (cancelled) return
+        if (error) {
+          throw new Error(/store_proxy_settings/.test(error.message)
             ? 'The proxy settings table does not exist yet — run store-proxy-settings.sql in Supabase first.'
-            : `Failed to load: ${error.message}`,
-        })
+            : error.message)
+        }
+        const row = data as { proxy_list: string | null; enabled: boolean | null } | null
+        setSavedList(String(row?.proxy_list || ''))
+        // amazon-fetch: no row → no list; a row is used unless enabled === false.
+        const isOn = row ? row.enabled !== false : false
+        setSavedEnabled(isOn)
+        setEnabled(isOn)
+      } catch (err) {
+        if (!cancelled) setLoadError(errorText(err, 'Failed to load proxy settings'))
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-      setProxyText(String(data?.proxy_list || ''))
-      setEnabled(data?.enabled ?? true)
-      setLoading(false)
     }
     void load()
     return () => { cancelled = true }
-  }, [storeId])
+  }, [storeId, reloadKey])
 
-  const parsed = countValidProxyLines(proxyText)
+  const savedParsed = countValidProxyLines(savedList)
+  const newParsed = countValidProxyLines(newText)
+  const savedLines = proxyLines(savedList)
+  const hasNewText = newText.trim().length > 0
 
-  async function save() {
-    if (!storeId) return
+  async function persist(proxyList: string, isEnabled: boolean, successText: string) {
+    if (!storeId || loadError) return
     setSaving(true)
     setMessage(null)
     try {
       const { error } = await supabase.from('store_proxy_settings').upsert({
         store_id: storeId,
-        proxy_list: proxyText,
-        enabled,
+        proxy_list: proxyList,
+        enabled: isEnabled,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'store_id' })
       if (error) throw new Error(error.message)
-      setMessage({
-        type: 'success',
-        text: enabled && parsed.valid > 0
-          ? `Saved. Amazon checks for this store now use these ${parsed.valid} proxies.`
-          : 'Saved. This store uses the default proxy (IPRoyal).',
-      })
+      setSavedList(proxyList)
+      setSavedEnabled(isEnabled)
+      setNewText('')
+      setConfirmClear(false)
+      setMessage({ type: 'success', text: successText })
     } catch (err) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Failed to save' })
+      setMessage({ type: 'error', text: errorText(err, 'Failed to save') })
     } finally {
       setSaving(false)
     }
   }
 
+  async function save() {
+    if (hasNewText && newParsed.valid === 0) {
+      setMessage({ type: 'error', text: 'None of the new lines is a valid proxy — nothing was saved.' })
+      return
+    }
+    // An empty textarea never touches the saved lines: only the on/off switch is saved.
+    let nextList = savedList
+    if (hasNewText) {
+      if (mode === 'replace') {
+        nextList = proxyLines(newText).join('\n')
+      } else {
+        const seen = new Set(savedLines)
+        const merged = [...savedLines]
+        for (const line of proxyLines(newText)) {
+          if (!seen.has(line)) { seen.add(line); merged.push(line) }
+        }
+        nextList = merged.join('\n')
+      }
+    }
+    const count = countValidProxyLines(nextList).valid
+    await persist(nextList, enabled, `Saved. Fallback list: ${count} prox${count === 1 ? 'y' : 'ies'}, ${enabled ? 'enabled' : 'disabled'}.`)
+  }
+
+  async function clearList() {
+    await persist('', enabled, 'Saved fallback proxy list cleared.')
+  }
+
   // Runs up to 3 rounds (each up to 30 Amazon page loads spread over the proxies) against real
-  // ASINs from this store's active listings. Nothing is saved or changed by the test.
+  // ASINs from this store's active listings. Nothing is saved or changed by the test. With an
+  // empty textarea the server tests the SAVED list itself (credentials never leave the server).
   async function runTest() {
-    if (!storeId || parsed.valid === 0) return
+    const testCount = hasNewText ? newParsed.valid : savedParsed.valid
+    if (!storeId || testCount === 0) return
     setTesting(true)
     setTestError(null)
     setTestRows([])
     try {
-      const { data: rows } = await supabase
+      const { data: rows, error: rowsErr } = await supabase
         .from('listings')
         .select('asin')
         .eq('store_id', storeId)
         .eq('status', 'active')
         .not('asin', 'is', null)
         .limit(300)
+      if (rowsErr) throw new Error(`Could not read listings for the test: ${rowsErr.message}`)
       const pool = Array.from(new Set(((rows || []) as Array<{ asin: string | null }>).map(r => String(r.asin || '').toUpperCase()).filter(a => /^[A-Z0-9]{10}$/.test(a))))
       const merged = new Map<string, ProxyTestRow>()
       const rounds = 3
@@ -2051,8 +2649,8 @@ function ProxySection() {
         const sample = pool.sort(() => Math.random() - 0.5).slice(0, 10)
         const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/amazon-fetch`, {
           method: 'POST',
-          headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ asin: 'TEST_PROXY_LIST', proxies: proxyText, test_asins: sample }),
+          headers: { ...(await authHeaders()), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asin: 'TEST_PROXY_LIST', store_id: storeId, proxies: hasNewText ? newText : '', test_asins: sample }),
         })
         const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string; results?: ProxyTestRow[] }
         if (!res.ok || !data.success || !data.results) throw new Error(data.error || `Test failed (HTTP ${res.status}). Is the new amazon-fetch deployed?`)
@@ -2084,57 +2682,89 @@ function ProxySection() {
   if (connectedStores.length === 0) {
     return <p className="text-sm text-slate-500">Connect an eBay store first.</p>
   }
+  if (loading) return <div className="p-6 text-center text-sm text-slate-500">Loading…</div>
+  if (loadError) return <LoadErrorBox text={loadError} onRetry={() => setReloadKey(k => k + 1)} />
 
   return (
     <div className="space-y-5">
-      <p className="text-sm text-slate-600">
-        Proxies used for this store's Amazon price and stock checks. Each check uses a different proxy from the list; a proxy that
-        gets a CAPTCHA is rested for 10 minutes. Leave the list empty (or switch it off) to keep using the default proxy.
-      </p>
+      <div className="flex items-start gap-1.5 rounded-lg bg-slate-50 border border-slate-200 px-3 py-2">
+        <Info className="h-3.5 w-3.5 text-slate-500 shrink-0 mt-0.5" />
+        <p className="text-xs text-slate-600">
+          Uploads and Amazon price/stock checks now use the Webshare proxy IPs configured on the server (the AMAZON_PROXIES secret) — nothing here is needed for that.
+          This per-store list is only a <span className="font-medium">fallback</span> for the server's last-resort direct scrape, and it is currently
+          {' '}<span className={cn('font-medium', savedEnabled ? 'text-success-700' : 'text-slate-900')}>{savedEnabled ? 'enabled' : 'disabled'}</span> for {storeLabel(activeStore)}.
+        </p>
+      </div>
 
-      <div className="flex flex-wrap items-end gap-6">
-        <div className="max-w-xs w-full">
-          <label className="label">Store</label>
-          <select className="input" value={storeId} onChange={e => setStoreId(e.target.value)} disabled={testing || saving}>
-            {connectedStores.map(s => <option key={s.id} value={s.id}>{s.nickname}</option>)}
-          </select>
-        </div>
-        <div className="flex items-center gap-3 pb-2">
-          <Toggle checked={enabled} onChange={setEnabled} />
-          <span className="text-sm text-slate-700">Use this list for this store</span>
-        </div>
+      <div className="flex items-center gap-3">
+        <Toggle checked={enabled} onChange={setEnabled} />
+        <span className="text-sm text-slate-700">Use this fallback list for {storeLabel(activeStore)}</span>
+        {enabled !== savedEnabled && <span className="text-xs text-amber-600">(unsaved)</span>}
       </div>
 
       <div>
-        <label className="label">Proxy list (one per line)</label>
+        <div className="flex items-center justify-between">
+          <p className="label">Saved proxies ({savedParsed.valid} valid)</p>
+          {savedLines.length > 0 && !confirmClear && (
+            <button className="text-xs font-medium text-error-600 hover:text-error-700" onClick={() => setConfirmClear(true)} disabled={saving}>Clear list</button>
+          )}
+        </div>
+        {savedLines.length > 0 ? (
+          <ul className="mt-1 max-h-40 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-700">
+            {savedLines.map((line, i) => <li key={`${i}-${line.length}`}>{maskProxyLine(line)}</li>)}
+          </ul>
+        ) : (
+          <p className="mt-1 text-xs text-slate-500">No proxies saved for this store.</p>
+        )}
+        {confirmClear && (
+          <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-error-200 bg-error-50 px-3 py-2 text-xs text-error-700">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">Delete all {savedLines.length} saved proxy line{savedLines.length === 1 ? '' : 's'} for this store? This cannot be undone.</span>
+            <button className="btn-ghost text-xs" onClick={() => setConfirmClear(false)} disabled={saving}>Cancel</button>
+            <button className="btn-danger text-xs" onClick={() => void clearList()} disabled={saving}>
+              {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />} Clear list
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label className="label" htmlFor="proxy-new-lines">Add or replace proxies (one per line)</label>
+          <div className="flex items-center gap-3 text-xs text-slate-600">
+            <label className="inline-flex items-center gap-1"><input type="radio" name="proxy-mode" checked={mode === 'add'} onChange={() => setMode('add')} /> Add to saved list</label>
+            <label className="inline-flex items-center gap-1"><input type="radio" name="proxy-mode" checked={mode === 'replace'} onChange={() => setMode('replace')} /> Replace saved list</label>
+          </div>
+        </div>
         <textarea
-          rows={8}
+          id="proxy-new-lines"
+          rows={6}
           className="input font-mono text-xs"
-          value={proxyText}
-          onChange={e => setProxyText(e.target.value)}
+          value={newText}
+          onChange={e => setNewText(e.target.value)}
           placeholder={'ip:port:username:password\n38.154.0.1:5868:myuser:mypass\nsocks5://myuser:mypass@38.154.0.2:6000'}
-          disabled={loading}
           spellCheck={false}
+          autoComplete="off"
         />
         <p className="mt-1 text-xs text-slate-500">
-          {parsed.valid} valid prox{parsed.valid === 1 ? 'y' : 'ies'}
-          {parsed.invalid.length > 0 && <span className="text-error-600"> · {parsed.invalid.length} line{parsed.invalid.length === 1 ? '' : 's'} not understood: {parsed.invalid.slice(0, 3).join(', ')}</span>}
+          {hasNewText ? <>{newParsed.valid} valid new prox{newParsed.valid === 1 ? 'y' : 'ies'}</> : 'Leave empty to keep the saved list as it is (Save then only stores the on/off switch).'}
+          {newParsed.invalid.length > 0 && <span className="text-error-600"> · {newParsed.invalid.length} line{newParsed.invalid.length === 1 ? '' : 's'} not understood</span>}
           {' '}· Formats: ip:port:user:pass, user:pass@ip:port, http://… or socks5://…
         </p>
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <button className="btn-primary" onClick={() => void save()} disabled={saving || loading || testing}>
+        <button className="btn-primary" onClick={() => void save()} disabled={saving || testing}>
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-          {saving ? 'Saving…' : 'Save'}
+          {saving ? 'Saving…' : hasNewText ? (mode === 'replace' ? 'Save (replace list)' : 'Save (add to list)') : 'Save'}
         </button>
-        <button className="btn-secondary" onClick={() => void runTest()} disabled={testing || parsed.valid === 0}>
+        <button className="btn-secondary" onClick={() => void runTest()} disabled={testing || (hasNewText ? newParsed.valid === 0 : savedParsed.valid === 0)}>
           {testing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-          {testing ? `Testing… ${testProgress}` : 'Test proxies on Amazon'}
+          {testing ? `Testing… ${testProgress}` : hasNewText ? 'Test new proxies on Amazon' : 'Test saved proxies on Amazon'}
         </button>
-        {message && <span className={cn('text-sm', message.type === 'success' ? 'text-success-600' : 'text-error-600')}>{message.text}</span>}
+        <NoticeText notice={message} />
       </div>
-      <p className="text-xs text-slate-400">The test uses the list as typed above (no need to save first) and loads real product pages from this store's listings. It takes about a minute. Use US proxies only.</p>
+      <p className="text-xs text-slate-400">The test uses the new lines typed above, or the saved list when the box is empty (no need to save first), and loads real product pages from this store's listings. It takes about a minute. Use US proxies only.</p>
 
       {testError && (
         <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">

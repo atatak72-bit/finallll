@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Search, PackagePlus, Upload, Save, Link2,
@@ -6,10 +6,10 @@ import {
   ShieldAlert, ListChecks, Plus, Trash2, Wand2, X,
   Download, ChevronLeft, ChevronRight, Circle, Ban, Clock,
 } from 'lucide-react'
-import { cn, formatCurrency, calculateEbayPrice, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, type PricingTierInput } from '../lib/utils'
+import { cn, formatCurrency, calculateEbayPrice, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, extractBasicAspectsFromSpecs, sanitizeAspects, type PricingTierInput } from '../lib/utils'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
-import type { AmazonProduct } from '../lib/useData'
+import type { AmazonProduct, PublishListingPayload } from '../lib/useData'
 import type { BulkRun, BulkRunItem } from '../lib/useData'
 import { isBlockedBulkError } from '../lib/useData'
 
@@ -20,7 +20,10 @@ interface ItemSpecific {
   value: string
 }
 
-const HARDCODED_BLOCKS = ['amazon', 'amazon basics', 'amazonbasics', 'prime', 'fulfilled by amazon']
+// Always blocked, whatever the store's VeRO settings say — the same list the bulk pipeline uses.
+// Matched as whole words only ("prime" is deliberately not here: it blocked ordinary titles
+// such as "Prime Rib Seasoning").
+const HARDCODED_BLOCKS = ['amazon', 'amazon basics', 'amazonbasics', 'fulfilled by amazon']
 
 function truncateTitleTo80(title: string) {
   if (!title) return ''
@@ -34,189 +37,288 @@ function truncateTitleTo80(title: string) {
   return t.trim()
 }
 
-function stripHtml(html: string) {
-  if (!html) return ''
+// ---- VeRO helpers (same whole-word rules as amazon-fetch and the bulk pipeline) ----
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// Whole-word, case-insensitive ("Anua" must not match "January", "Active" not "Inactive").
+function wordRegex(word: string, flags = 'iu'): RegExp | null {
+  const w = (word || '').trim()
+  if (!w) return null
   try {
-    const doc = new DOMParser().parseFromString(html, 'text/html')
-    return doc.body.textContent || ''
+    return new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegex(w)}(?![\\p{L}\\p{N}])`, flags)
   } catch {
-    return html.replace(/<\/?[^>]+(>|$)/g, '')
+    return null
   }
 }
 
-function buildDetailedDescription(product: any) {
-  const descCandidates: string[] = []
-  const htmlFields = ['description', 'product_description', 'long_description', 'editorial_review']
-  for (const f of htmlFields) {
-    if (product?.[f] && typeof product[f] === 'string' && product[f].trim().length > 30) {
-      descCandidates.push(stripHtml(product[f]).trim())
-    }
+function findBlockedWord(text: string, words: string[]): string | null {
+  if (!text) return null
+  for (const w of words) {
+    const re = wordRegex(w)
+    if (re && re.test(text)) return w.trim()
   }
-  if (Array.isArray(product?.about_this_item) && product.about_this_item.length) {
-    descCandidates.push(product.about_this_item.map((b: any) => stripHtml(String(b))).join('\n'))
-  }
-  const bullets = product?.bullet_points ?? product?.feature_bullets ?? product?.features
-  if (Array.isArray(bullets) && bullets.length) {
-    const cleaned = bullets.map((b: any) => typeof b === 'string' ? stripHtml(b).trim() : '').filter(Boolean)
-    if (cleaned.length) descCandidates.push('Key Features:\n• ' + cleaned.join('\n• '))
-  }
-  const textFields = ['product_overview', 'product_information', 'details']
-  for (const f of textFields) {
-    if (product?.[f] && (typeof product[f] === 'string' || Array.isArray(product[f]))) {
-      if (Array.isArray(product[f])) {
-        descCandidates.push(product[f].map((x: any) => stripHtml(String(x))).join('\n'))
-      } else {
-        descCandidates.push(stripHtml(product[f]))
-      }
-    }
-  }
-  if (product?.specifications) {
-    const specsLines: string[] = []
-    if (Array.isArray(product.specifications)) {
-      product.specifications.forEach((s: any) => {
-        if (s && (s.key || s.name) && (s.value || s.val)) specsLines.push(`${s.key ?? s.name}: ${s.value ?? s.val}`)
-        else if (typeof s === 'string') specsLines.push(stripHtml(s))
-      })
-    } else if (typeof product.specifications === 'object') {
-      Object.entries(product.specifications).forEach(([k, v]) => specsLines.push(`${k}: ${v}`))
-    }
-    if (specsLines.length) descCandidates.push('Specifications:\n' + specsLines.join('\n'))
-  }
-  const joined = Array.from(new Set(descCandidates)).join('\n\n').trim()
-  if (joined.length > 30) return joined
-  const fallbackParts: string[] = []
-  if (product?.title) fallbackParts.push(product.title)
-  if (Array.isArray(bullets) && bullets.length) fallbackParts.push('Key Features:\n• ' + bullets.join('\n• '))
-  if (product?.brand) fallbackParts.push(`Brand: ${product.brand}`)
-  return fallbackParts.join('\n\n').trim()
+  return null
 }
 
-const KNOWN_KEYS_MAP: Record<string, string> = {
-  brand: 'Brand',
-  manufacturer: 'Brand',
-  mpn: 'MPN',
-  model: 'Model',
-  color: 'Color',
-  size: 'Size',
-  material: 'Material',
-  dimensions: 'Dimensions',
-  weight: 'Weight',
-  asin: 'ASIN',
-  ean: 'EAN',
-  upc: 'UPC'
+function stripWords(text: string, words: string[]): string {
+  if (!text) return text
+  let out = text
+  for (const w of words) {
+    const re = wordRegex(w, 'giu')
+    if (re) out = out.replace(re, '')
+  }
+  return out
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+([,.;:!?])/g, '$1')
+    .replace(/^[ \t,\-–|]+/gm, '')
+    .trim()
 }
 
-function normalizeKey(k: string) {
-  const key = k.toLowerCase().replace(/[_\s]+/g, ' ').trim()
-  return KNOWN_KEYS_MAP[key] ?? k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+// Amazon's byline often looks like "Visit the Anker Store" or "Brand: Anker" — reduce it to "Anker".
+function cleanBrandName(brand: string): string {
+  return (brand || '')
+    .replace(/^\s*(brand:\s*|visit the\s+)/i, '')
+    .replace(/\s+store\s*$/i, '')
+    .trim()
 }
 
-function extractItemSpecifics(product: any): { key: string; value: string }[] {
-  const seen = new Map<string, string>()
-  function add(k: string, v: any) {
-    if (!k || v == null) return
-    const nk = normalizeKey(k)
-    const nv = String(v).trim()
-    if (!nv) return
-    const keyLower = nk.toLowerCase()
-    if (!seen.has(keyLower)) {
-      seen.set(keyLower, nv)
-    } else {
-      const prev = seen.get(keyLower)!
-      if (prev.length < nv.length) seen.set(keyLower, nv)
+// ---- Item specifics: same approach as the bulk pipeline ----
+
+// eBay treats any listing that carries an "EPA Registration Number" item specific as a
+// pesticide and rejects it outside pesticide categories (errorId 25019). Drop that field unless
+// it holds a real registration number. (Local copy of the bulk pipeline's helper.)
+function withoutPlaceholderEpa(aspects: Record<string, string[]>): Record<string, string[]> {
+  const out: Record<string, string[]> = {}
+  for (const [name, values] of Object.entries(aspects)) {
+    if (/^epa registration n/i.test(name.trim())) {
+      const real = (values || []).filter(v => v && !/^(n\/?a|none|does not apply|not applicable|unknown)$/i.test(String(v).trim()))
+      if (real.length === 0) continue
+      out[name] = real
+      continue
+    }
+    out[name] = values
+  }
+  return out
+}
+
+// Builds publish-ready aspects from the live amazon-fetch product (`specs`), exactly like bulk.
+function productAspects(product: AmazonProduct): Record<string, string[]> | undefined {
+  return sanitizeAspects(withoutPlaceholderEpa(extractBasicAspectsFromSpecs(product.specs)))
+}
+
+function extractItemSpecifics(product: AmazonProduct): ItemSpecific[] {
+  const aspects = productAspects(product) || {}
+  return Object.entries(aspects).map(([key, values]) => ({ key, value: values[0] || '' }))
+}
+
+// Only a numeric id is an eBay category. Anything else (an Amazon category name or path) is
+// left out so the publish route auto-detects the eBay category itself.
+function isNumericCategoryId(v: string | null | undefined): boolean {
+  return /^\d+$/.test((v || '').trim())
+}
+
+// ---- Store settings loaders ----
+
+function numOr(v: unknown, fallback: number): number {
+  if (v === null || v === undefined || v === '') return fallback
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+
+// "$12", "1,299.00", " 12.5 " → number; null when it isn't a usable price.
+function parsePriceInput(raw: string): number | null {
+  const cleaned = String(raw ?? '').replace(/[$,\s]/g, '')
+  if (!cleaned || !/^\d*\.?\d+$/.test(cleaned)) return null
+  const n = Number(cleaned)
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null
+}
+
+interface StorePricing {
+  enabled: boolean
+  feePct: number
+  fixedFee: number
+  tiers: PricingTierInput[]
+}
+
+const DEFAULT_PRICING: StorePricing = { enabled: true, feePct: 13.25, fixedFee: 0.30, tiers: [] }
+
+async function loadStorePricing(storeId: string): Promise<StorePricing> {
+  const [settingsRes, tiersRes] = await Promise.all([
+    supabase.from('pricing_settings').select('pricing_enabled, ebay_percentage_fee, ebay_fixed_fee').eq('store_id', storeId).maybeSingle(),
+    supabase.from('pricing_rules').select('min_price, max_price, profit_pct, fixed_profit, sort_order').eq('store_id', storeId).order('sort_order', { ascending: true }),
+  ])
+  if (settingsRes.error) throw new Error(`Could not load pricing settings: ${settingsRes.error.message}`)
+  if (tiersRes.error) throw new Error(`Could not load pricing rules: ${tiersRes.error.message}`)
+  const s = (settingsRes.data || null) as { pricing_enabled: boolean | null; ebay_percentage_fee: unknown; ebay_fixed_fee: unknown } | null
+  const rules = (tiersRes.data || []) as Array<{ min_price: unknown; max_price: unknown; profit_pct: unknown; fixed_profit: unknown }>
+  return {
+    enabled: s?.pricing_enabled ?? DEFAULT_PRICING.enabled,
+    feePct: numOr(s?.ebay_percentage_fee, DEFAULT_PRICING.feePct),
+    fixedFee: numOr(s?.ebay_fixed_fee, DEFAULT_PRICING.fixedFee),
+    tiers: rules.map(r => ({
+      min: numOr(r.min_price, 0),
+      max: numOr(r.max_price, 999999),
+      profitPct: numOr(r.profit_pct, 20),
+      fixProfit: numOr(r.fixed_profit, 0),
+    })),
+  }
+}
+
+// Pricing off → eBay price = Amazon price (what Settings says). Pricing on but no rules →
+// amazon-fetch's suggested price (same fallback as bulk). Otherwise the store's rules.
+function computeListPrice(amazonPrice: number, suggestedPrice: number, p: StorePricing): number {
+  if (!p.enabled) return amazonPrice
+  if (p.tiers.length === 0) return suggestedPrice > 0 ? suggestedPrice : amazonPrice
+  return calculateEbayPrice(amazonPrice, p.tiers, p.feePct, p.fixedFee, true).finalPrice
+}
+
+interface StoreVero {
+  blockKeywords: string[]
+  removeKeywords: string[]
+  blockInBrand: boolean
+  blockInTitle: boolean
+  blockInDescription: boolean
+  autoRemoveBrand: boolean
+}
+
+const DEFAULT_VERO: StoreVero = { blockKeywords: [], removeKeywords: [], blockInBrand: true, blockInTitle: true, blockInDescription: true, autoRemoveBrand: false }
+
+async function loadStoreVero(storeId: string): Promise<StoreVero> {
+  const { data, error } = await supabase
+    .from('store_vero_settings')
+    .select('block_keywords, remove_keywords, block_in_brand, block_in_title, block_in_description, auto_remove_brand')
+    .eq('store_id', storeId)
+    .maybeSingle()
+  if (error) throw new Error(`Could not load VeRO settings: ${error.message}`)
+  const row = (data || null) as {
+    block_keywords: string[] | null; remove_keywords: string[] | null
+    block_in_brand: boolean | null; block_in_title: boolean | null; block_in_description: boolean | null
+    auto_remove_brand: boolean | null
+  } | null
+  if (!row) return DEFAULT_VERO
+  return {
+    blockKeywords: (row.block_keywords || []).filter(Boolean),
+    removeKeywords: (row.remove_keywords || []).filter(Boolean),
+    blockInBrand: row.block_in_brand ?? true,
+    blockInTitle: row.block_in_title ?? true,
+    blockInDescription: row.block_in_description ?? true,
+    autoRemoveBrand: row.auto_remove_brand ?? false,
+  }
+}
+
+async function loadPromotedDefaults(storeId: string): Promise<{ autoPromote: boolean; adRate: number }> {
+  const { data, error } = await supabase
+    .from('store_promoted_settings')
+    .select('auto_promote_enabled, default_ad_rate')
+    .eq('store_id', storeId)
+    .maybeSingle()
+  if (error) throw new Error(`Could not load promoted listing settings: ${error.message}`)
+  const row = (data || null) as { auto_promote_enabled: boolean | null; default_ad_rate: unknown } | null
+  const rate = numOr(row?.default_ad_rate, 3)
+  return { autoPromote: row?.auto_promote_enabled ?? false, adRate: rate > 0 ? rate : 3 }
+}
+
+async function loadActiveTemplate(storeId: string): Promise<string> {
+  const { data } = await supabase
+    .from('listing_templates')
+    .select('template')
+    .eq('store_id', storeId)
+    .eq('is_active', true)
+    .maybeSingle()
+  const row = (data || null) as { template: string | null } | null
+  return row?.template || DEFAULT_LISTING_TEMPLATE
+}
+
+// supabase.functions.invoke does not throw: a non-2xx response comes back as `error`, whose
+// `context` is the Response — read the function's own { error } message from it when possible.
+async function functionErrorMessage(err: unknown): Promise<string> {
+  const ctx = (err as { context?: unknown } | null)?.context
+  if (typeof Response !== 'undefined' && ctx instanceof Response) {
+    try {
+      const body = (await ctx.clone().json()) as { error?: unknown }
+      if (typeof body?.error === 'string' && body.error) return body.error
+    } catch {
+      // not JSON — fall through to the generic message
     }
   }
-  // Brand is deliberately never populated with the real brand name here — set to a safe
-  // placeholder instead, consistently with the AI-generated specifics (see ai-generate-content).
-  seen.set('brand', 'Does not apply')
-  add('MPN', product?.mpn ?? product?.manufacturerPartNumber)
-  add('Model', product?.model)
-  const sources = [product?.specifications, product?.attributes, product?.product_information, product?.details, product?.product_overview]
-  for (const src of sources) {
-    if (!src) continue
-    if (Array.isArray(src)) {
-      src.forEach((item: any) => {
-        if (item && typeof item === 'object') {
-          const k = item.key ?? item.name ?? item.label
-          const v = item.value ?? item.val ?? item.content
-          add(k, v)
-        } else if (typeof item === 'string') {
-          const [k, ...rest] = item.split(':')
-          if (rest.length) add(k, rest.join(':').trim())
-        }
-      })
-    } else if (typeof src === 'object') {
-      Object.entries(src).forEach(([k, v]) => {
-        if (typeof v === 'string' || typeof v === 'number') add(k, v)
-        else if (Array.isArray(v)) add(k, v.join(', '))
-      })
-    } else if (typeof src === 'string') {
-      src.split('\n').forEach(line => {
-        const [k, ...rest] = line.split(':')
-        if (rest.length) add(k, rest.join(':').trim())
-      })
-    }
-  }
-  const bullets = product?.bullet_points ?? product?.feature_bullets ?? product?.features
-  if (Array.isArray(bullets)) {
-    bullets.forEach((b: any) => {
-      if (typeof b !== 'string') return
-      const [k, ...rest] = b.split(':')
-      if (!rest.length) return
-      add(k, rest.join(':').trim())
+  return err instanceof Error ? err.message : String(err ?? '')
+}
+
+// Adds a just-published listing to Promoted Listings. ebay-promote-listing answers 200 with
+// success:false when eBay declines, so the body is checked, not just the call. On success the
+// listing row (store_id + asin, never the draft row) is flagged promoted.
+async function promoteListing(storeId: string, ebayListingId: string, asin: string, adRate: number): Promise<{ ok: boolean; message: string }> {
+  try {
+    const { data, error } = await supabase.functions.invoke('ebay-promote-listing', {
+      body: { storeId, listingId: ebayListingId, adRate },
     })
-  }
-  const result: { key: string; value: string }[] = []
-  for (const [k, v] of seen.entries()) {
-    result.push({ key: k.replace(/\b\w/g, c => c.toUpperCase()), value: v })
-  }
-  return result
-}
-
-function detectCategorySuggestion(product: any) {
-  if (product?.category && typeof product.category === 'string' && product.category.length > 2) {
-    return product.category
-  }
-  if (Array.isArray(product?.browse_nodes) && product.browse_nodes.length) {
-    const labels = product.browse_nodes.map((n: any) => n?.name || n?.label).filter(Boolean)
-    if (labels.length) return labels.join(' > ')
-  }
-  const title = (product?.title ?? '').toLowerCase()
-  if (title.includes('wire') || title.includes('cable')) return 'Electronics > Accessories > Cables & Interconnects'
-  if (title.includes('shirt') || title.includes('t-shirt')) return 'Clothing, Shoes & Accessories > Men'
-  return ''
-}
-
-function parseCsv(text: string): string[][] {
-  const clean = text.replace(/^\uFEFF/, '')
-  const rows: string[][] = []
-  let row: string[] = []
-  let field = ''
-  let inQuotes = false
-  for (let i = 0; i < clean.length; i++) {
-    const c = clean[i]
-    if (inQuotes) {
-      if (c === '"') {
-        if (clean[i + 1] === '"') { field += '"'; i++ } else { inQuotes = false }
-      } else {
-        field += c
-      }
-    } else {
-      if (c === '"') {
-        inQuotes = true
-      } else if (c === ',') {
-        row.push(field); field = ''
-      } else if (c === '\n' || c === '\r') {
-        if (c === '\r' && clean[i + 1] === '\n') i++
-        row.push(field); field = ''
-        rows.push(row); row = []
-      } else {
-        field += c
-      }
+    const result = (data || {}) as { success?: boolean; error?: string }
+    if (error || !result.success) {
+      const msg = result.error || (error ? await functionErrorMessage(error) : '')
+      return { ok: false, message: msg || 'eBay did not accept the promotion.' }
     }
+    const { error: updErr } = await supabase
+      .from('listings')
+      .update({ promoted: true })
+      .eq('store_id', storeId)
+      .eq('asin', asin)
+      .neq('status', 'draft')
+    if (updErr) return { ok: true, message: `Promoted at ${adRate}% ad rate, but the listing could not be marked as promoted here: ${updErr.message}` }
+    return { ok: true, message: `Promoted at ${adRate}% ad rate.` }
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Promotion request failed.' }
   }
-  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row) }
-  return rows.filter(r => r.some(c => c.trim() !== ''))
+}
+
+// ---- Bulk runs being processed by this browser tab ----
+// Kept at module level (not in page state) so leaving List Items and coming back keeps the
+// "Processing…" state and the close-tab warning: processBulkRun lives in the app-wide data
+// context and keeps running while you are on another page. A reload really does stop the
+// processing, and this list is (correctly) empty again after one — unlike sessionStorage,
+// which would survive the reload and show a run as processing forever.
+let activeRunIdsGlobal: string[] = []
+const activeRunListeners = new Set<() => void>()
+
+function onActiveRunsBeforeUnload(e: BeforeUnloadEvent) {
+  e.preventDefault()
+  e.returnValue = ''
+}
+
+function updateActiveRunIds(update: (prev: string[]) => string[]) {
+  const next = update(activeRunIdsGlobal)
+  if (next === activeRunIdsGlobal) return
+  const wasActive = activeRunIdsGlobal.length > 0
+  activeRunIdsGlobal = next
+  const isActive = next.length > 0
+  // Warn before the tab is closed or reloaded while a batch is still running — on every page,
+  // not only while List Items is open.
+  if (isActive && !wasActive) window.addEventListener('beforeunload', onActiveRunsBeforeUnload)
+  if (!isActive && wasActive) window.removeEventListener('beforeunload', onActiveRunsBeforeUnload)
+  activeRunListeners.forEach(l => l())
+}
+
+function useActiveRunIds(): string[] {
+  return useSyncExternalStore(
+    (cb: () => void) => {
+      activeRunListeners.add(cb)
+      return () => { activeRunListeners.delete(cb) }
+    },
+    () => activeRunIdsGlobal,
+  )
+}
+
+interface DraftRow {
+  id: string
+  title: string
+  image: string | null
+  ebay_price: number
+  amazon_price: number | null
+  asin: string | null
+  quantity: number
+  promoted: boolean | null
 }
 
 // ---- Bulk run detail modal ----
@@ -232,7 +334,7 @@ type DetailTab = 'all' | 'success' | 'blocked' | 'failed' | 'pending'
 
 function classifyItem(item: BulkRunItem): DetailTab {
   if (item.status === 'success') return 'success'
-  if (item.status === 'pending') return 'pending'
+  if (item.status === 'pending' || item.status === 'processing') return 'pending'
   if (isBlockedBulkError(item.error)) return 'blocked'
   return 'failed'
 }
@@ -463,7 +565,7 @@ function BulkRunDetailModal({
 }
 
 export default function ListItems() {
-  const { stores, listings, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun } = useStoreData()
+  const { stores, listings, fetchAmazonProduct, publishListing, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, refresh } = useStoreData()
   const [tab, setTab] = useState<Tab>('single')
   const [asin, setAsin] = useState('')
   const [product, setProduct] = useState<AmazonProduct | null>(null)
@@ -472,10 +574,15 @@ export default function ListItems() {
   const [publishing, setPublishing] = useState(false)
   const [publishError, setPublishError] = useState<string | null>(null)
   const [publishSuccess, setPublishSuccess] = useState<string | null>(null)
+  // Outcome of the Promoted Listings call after a Single publish (eBay can decline it).
+  const [promoteNotice, setPromoteNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  const [savingDraft, setSavingDraft] = useState(false)
   const [generatingTitle, setGeneratingTitle] = useState(false)
   const [aiTitleError, setAiTitleError] = useState<string | null>(null)
   const [currentListingTemplate, setCurrentListingTemplate] = useState('')
-  const [promoted, setPromoted] = useState(true)
+  // Defaults come from Settings → Promoted listings (auto_promote_enabled / default_ad_rate).
+  const [promoted, setPromoted] = useState(false)
+  const [promoteAdRate, setPromoteAdRate] = useState(3)
 
   const [reviewTitle, setReviewTitle] = useState('')
   const [reviewDescription, setReviewDescription] = useState('')
@@ -486,11 +593,8 @@ export default function ListItems() {
 
   const [itemSpecifics, setItemSpecifics] = useState<ItemSpecific[]>([])
 
-  const [pricingTiers, setPricingTiers] = useState<PricingTierInput[]>([])
-  const [ebayFeePct, setEbayFeePct] = useState(13.25)
-  const [ebayFixedFee, setEbayFixedFee] = useState(0.30)
-  const [pricingEnabled, setPricingEnabled] = useState(true)
-  const [veroBlockKeywords, setVeroBlockKeywords] = useState<string[]>([])
+  const [pricing, setPricing] = useState<StorePricing>(DEFAULT_PRICING)
+  const [vero, setVero] = useState<StoreVero>(DEFAULT_VERO)
 
   const [bulkStoreId, setBulkStoreId] = useState('')
   const [bulkText, setBulkText] = useState('')
@@ -503,8 +607,8 @@ export default function ListItems() {
   const [bulkError, setBulkError] = useState<string | null>(null)
   // Which bulk runs are currently being processed in the background — a list, not a
   // single id, since multiple runs can now process concurrently (starting a new batch no
-  // longer waits for a previous one to finish).
-  const [activeRunIds, setActiveRunIds] = useState<string[]>([])
+  // longer waits for a previous one to finish). Module-level, see useActiveRunIds.
+  const activeRunIds = useActiveRunIds()
   const [batchPolicies, setBatchPolicies] = useState<{
     payment: { id: string; name: string }[]
     fulfillment: { id: string; name: string }[]
@@ -521,9 +625,11 @@ export default function ListItems() {
   // state — doesn't touch bulkRuns data itself.
   const [openRunId, setOpenRunId] = useState<string | null>(null)
 
-  const [draftListings, setDraftListings] = useState<Array<{ id: string; title: string; image: string | null; ebay_price: number; asin: string | null; quantity: number }>>([])
+  const [draftListings, setDraftListings] = useState<DraftRow[]>([])
   const [draftsLoading, setDraftsLoading] = useState(false)
   const [publishingDraftId, setPublishingDraftId] = useState<string | null>(null)
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const [draftNotice, setDraftNotice] = useState<string | null>(null)
 
   const activeStore = stores.find(s => s.active) || stores[0]
   const [singleStoreId, setSingleStoreId] = useState('')
@@ -531,39 +637,32 @@ export default function ListItems() {
 
   useEffect(() => {
     if (!singleStore?.id) return
+    const storeId = singleStore.id
     let cancelled = false
 
     async function loadSettings() {
-      const [settingsRes, tiersRes, veroRes] = await Promise.all([
-        supabase.from('pricing_settings').select('pricing_enabled, ebay_percentage_fee, ebay_fixed_fee').eq('store_id', singleStore!.id).maybeSingle(),
-        supabase.from('pricing_rules').select('min_price, max_price, profit_pct, fixed_profit, sort_order').eq('store_id', singleStore!.id).order('sort_order', { ascending: true }),
-        supabase.from('store_vero_settings').select('block_keywords').eq('store_id', singleStore!.id).maybeSingle(),
+      // Each store's own settings — reset to defaults first so a store without a settings row
+      // never inherits the previously selected store's values.
+      const [pricingRes, veroRes, promoRes] = await Promise.allSettled([
+        loadStorePricing(storeId),
+        loadStoreVero(storeId),
+        loadPromotedDefaults(storeId),
       ])
       if (cancelled) return
 
-      if (settingsRes.error) {
-        console.error('pricing_settings error', settingsRes.error)
-      } else if (settingsRes.data) {
-        setPricingEnabled(settingsRes.data.pricing_enabled ?? true)
-        setEbayFeePct(Number(settingsRes.data.ebay_percentage_fee) || 13.25)
-        setEbayFixedFee(Number(settingsRes.data.ebay_fixed_fee) || 0.30)
-      }
+      if (pricingRes.status === 'fulfilled') setPricing(pricingRes.value)
+      else { console.error('pricing settings error', pricingRes.reason); setPricing(DEFAULT_PRICING) }
 
-      if (tiersRes.error) {
-        console.error('pricing_rules error', tiersRes.error)
-      } else if (tiersRes.data) {
-        setPricingTiers(tiersRes.data.map(r => ({
-          min: Number(r.min_price) || 0,
-          max: Number(r.max_price) || 999999,
-          profitPct: Number(r.profit_pct) || 20,
-          fixProfit: Number(r.fixed_profit) || 0,
-        })))
-      }
+      if (veroRes.status === 'fulfilled') setVero(veroRes.value)
+      else { console.error('store_vero_settings error', veroRes.reason); setVero(DEFAULT_VERO) }
 
-      if (veroRes.error) {
-        console.error('store_vero_settings error', veroRes.error)
-      } else if (veroRes.data) {
-        setVeroBlockKeywords((veroRes.data.block_keywords as string[]) || [])
+      if (promoRes.status === 'fulfilled') {
+        setPromoted(promoRes.value.autoPromote)
+        setPromoteAdRate(promoRes.value.adRate)
+      } else {
+        console.error('store_promoted_settings error', promoRes.reason)
+        setPromoted(false)
+        setPromoteAdRate(3)
       }
     }
 
@@ -571,37 +670,28 @@ export default function ListItems() {
     return () => { cancelled = true }
   }, [singleStore?.id])
 
-  const veroPatterns = useMemo(() => {
-    const all = [...HARDCODED_BLOCKS, ...(veroBlockKeywords || [])]
-      .map(k => (k || '').trim())
-      .filter(Boolean)
-      .map(k => k.toLowerCase())
+  // Store keywords are checked only where Settings → VeRO says to (brand / title / description),
+  // whole-word and case-insensitive. The hard-coded Amazon words are always checked.
+  const storeBlockWords = useMemo(() => vero.blockKeywords.map(k => (k || '').trim()).filter(Boolean), [vero.blockKeywords])
 
-    const regexes = all.map(k => {
-      const esc = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const safe = /^[a-z0-9\s]+$/.test(k)
-      return { keyword: k, re: safe ? new RegExp(`\\b${esc}\\b`, 'i') : null }
-    })
-    return { regexes, substrings: all }
-  }, [veroBlockKeywords])
-
-  const checkVeroViolation = (text: string): string | null => {
-    if (!text) return null
-    const lower = text.toLowerCase()
-    for (const { keyword, re } of veroPatterns.regexes) {
-      if (re && re.test(text)) return keyword
-    }
-    for (const k of veroPatterns.substrings) {
-      if (!k) continue
-      if (lower.includes(k)) return k
-    }
-    return null
-  }
-
-  const specificsText = useMemo(() => itemSpecifics.map(s => `${s.key} ${s.value}`).join(' '), [itemSpecifics])
-  const titleViolation = useMemo(() => checkVeroViolation(reviewTitle), [reviewTitle, veroPatterns])
-  const descViolation = useMemo(() => checkVeroViolation(reviewDescription), [reviewDescription, veroPatterns])
-  const specificsViolation = useMemo(() => checkVeroViolation(specificsText), [specificsText, veroPatterns])
+  const titleViolation = useMemo(
+    () => findBlockedWord(reviewTitle, vero.blockInTitle ? [...HARDCODED_BLOCKS, ...storeBlockWords] : HARDCODED_BLOCKS),
+    [reviewTitle, vero.blockInTitle, storeBlockWords],
+  )
+  const descViolation = useMemo(
+    () => findBlockedWord(reviewDescription, vero.blockInDescription ? [...HARDCODED_BLOCKS, ...storeBlockWords] : HARDCODED_BLOCKS),
+    [reviewDescription, vero.blockInDescription, storeBlockWords],
+  )
+  // Item specifics: the Brand / Manufacturer values are brand text (checked when "block in brand"
+  // is on); every value is checked against the hard-coded Amazon words.
+  const specificsViolation = useMemo(() => {
+    const brandText = itemSpecifics
+      .filter(s => /^(brand|manufacturer)$/i.test(s.key.trim()))
+      .map(s => s.value)
+      .join(' | ')
+    const allText = itemSpecifics.map(s => `${s.key}: ${s.value}`).join(' | ')
+    return (vero.blockInBrand ? findBlockedWord(brandText, storeBlockWords) : null) || findBlockedWord(allText, HARDCODED_BLOCKS)
+  }, [itemSpecifics, vero.blockInBrand, storeBlockWords])
 
   const activeViolation = titleViolation
     ? `Title contains restricted word: "${titleViolation}"`
@@ -615,29 +705,24 @@ export default function ListItems() {
     if (!asin.trim()) return
     setFetching(true)
     setFetchError(null)
+    setPublishError(null)
+    setPublishSuccess(null)
+    setPromoteNotice(null)
     setProduct(null)
     try {
-      const fetched: any = await fetchAmazonProduct(asin, singleStore?.id)
+      const fetched: AmazonProduct = await fetchAmazonProduct(asin, singleStore?.id)
 
-      const rawPrice = Number(fetched?.price ?? fetched?.amazon_price ?? fetched?.suggestedPrice ?? 0)
-      const calcPrice = pricingEnabled && pricingTiers.length > 0
-        ? (calculateEbayPrice(rawPrice, pricingTiers, ebayFeePct, ebayFixedFee, pricingEnabled)?.finalPrice ?? rawPrice)
-        : Number(fetched?.suggestedPrice ?? rawPrice)
+      const rawPrice = numOr(fetched?.price, 0)
+      const calcPrice = computeListPrice(rawPrice, numOr(fetched?.suggestedPrice, 0), pricing)
 
       setProduct(fetched)
       setReviewTitle(truncateTitleTo80(fetched?.title || ''))
-      setReviewPrice(!Number.isNaN(calcPrice) ? Number(calcPrice).toFixed(2) : '0.00')
+      setReviewPrice(Number.isFinite(calcPrice) ? calcPrice.toFixed(2) : '')
 
       const isOut = String(fetched?.stock ?? '').toLowerCase().includes('out')
       setQuantity(isOut ? 0 : (Number(fetched?.defaultQuantity) || 1))
 
-      const { data: templateRow } = await supabase
-        .from('listing_templates')
-        .select('template')
-        .eq('store_id', singleStore?.id || '')
-        .eq('is_active', true)
-        .maybeSingle()
-      const listingTemplate = templateRow?.template || DEFAULT_LISTING_TEMPLATE
+      const listingTemplate = singleStore?.id ? await loadActiveTemplate(singleStore.id) : DEFAULT_LISTING_TEMPLATE
       setCurrentListingTemplate(listingTemplate)
       const storeName = singleStore?.ebayUsername || singleStore?.nickname || 'Our Store'
       const builtDesc = fitDescriptionToBudget(listingTemplate, {
@@ -657,8 +742,10 @@ export default function ListItems() {
       const specs = extractItemSpecifics(fetched)
       setItemSpecifics(specs)
 
-      const suggested = detectCategorySuggestion(fetched)
-      setSelectedCategory(suggested || String(fetched?.category ?? ''))
+      // Amazon's category is a name/path, not an eBay category id — start on auto-detect.
+      // "Generate AI Title" can fill in a real (numeric) eBay category id.
+      setSelectedCategory('')
+      setSelectedCategoryName('')
 
     } catch (err) {
       setFetchError(err instanceof Error ? err.message : 'Failed to fetch ASIN.')
@@ -711,9 +798,10 @@ export default function ListItems() {
       if (result.title) {
         setReviewTitle(truncateTitleTo80(result.title))
       }
-      if (result.categoryId) {
-        setSelectedCategory(result.categoryId)
-        setSelectedCategoryName(result.categoryName || result.categoryId)
+      if (result.categoryId && isNumericCategoryId(String(result.categoryId))) {
+        const catId = String(result.categoryId).trim()
+        setSelectedCategory(catId)
+        setSelectedCategoryName(result.categoryName ? `${result.categoryName} (${catId})` : catId)
       }
       if (result.aspects && Object.keys(result.aspects).length > 0) {
         setItemSpecifics(
@@ -741,58 +829,72 @@ export default function ListItems() {
     }
   }
 
-  const handlePublish = async () => {
-    if (!singleStore || !product || activeViolation) return
-    setPublishing(true)
-    setPublishError(null)
+  // Builds the Single tab's publish data from what is on screen. Returns an error message
+  // instead when the typed price is not a usable number (no silent fallback to another price).
+  const buildSinglePayload = (): { payload: PublishListingPayload; price: number } | { error: string } => {
+    if (!product) return { error: 'Fetch a product first.' }
+    const price = parsePriceInput(reviewPrice)
+    if (price === null) return { error: `"${reviewPrice}" is not a valid eBay price. Enter a number such as 12.99.` }
+    const qty = Number(quantity)
+    if (!Number.isInteger(qty) || qty < 0) return { error: 'Quantity must be a whole number of 0 or more.' }
+    const mainImage = product.mainImage || (product.images && product.images[0]) || ''
 
-    try {
-      const priceToUse = Number(reviewPrice) || Number(product.suggestedPrice) || Number(product.price) || 0
-      const mainImage = (product.images && product.images[0]) || (product as any)?.mainImage || ''
+    const rawAspects: Record<string, string[]> = {}
+    for (const spec of itemSpecifics) {
+      const k = spec.key.trim()
+      const v = spec.value.trim()
+      if (k && v) rawAspects[k] = [v]
+    }
+    const aspects = sanitizeAspects(withoutPlaceholderEpa(rawAspects))
 
-      const aspects: Record<string, string[]> | undefined = itemSpecifics.length > 0
-        ? itemSpecifics.reduce((acc, spec) => {
-            if (spec.key.trim() && spec.value.trim()) acc[spec.key.trim()] = [spec.value.trim()]
-            return acc
-          }, {} as Record<string, string[]>)
-        : undefined
-
-      const listingId = await publishListing(singleStore.id, {
+    return {
+      price,
+      payload: {
         sku: product.asin,
         title: reviewTitle || truncateTitleTo80(product.title || ''),
-        price: priceToUse,
-        quantity: Number(quantity) || 0,
+        price,
+        quantity: qty,
         image: mainImage,
         images: (product.images && product.images.length > 0) ? product.images : (mainImage ? [mainImage] : []),
         description: reviewDescription,
-        categoryId: selectedCategory || undefined,
-        aspects: aspects && Object.keys(aspects).length > 0 ? aspects : undefined,
-      })
+        // Only a real (numeric) eBay category id; otherwise the publish route auto-detects.
+        categoryId: isNumericCategoryId(selectedCategory) ? selectedCategory.trim() : undefined,
+        aspects,
+        amazonPrice: numOr(product.price, 0) || undefined,
+      },
+    }
+  }
 
-      // Promoted Listings was being collected in the UI but never actually sent anywhere —
-      // this is what actually turns it on for the listing that was just published. Best-effort:
-      // eBay's own Promoted Listings eligibility can still decline this even when the call
-      // succeeds, so a failure here never fails the whole publish (the listing is already live).
-      if (promoted && listingId) {
-        try {
-          const { data: adSettings } = await supabase
-            .from('store_promoted_settings')
-            .select('default_ad_rate')
-            .eq('store_id', singleStore.id)
-            .maybeSingle()
-          const adRate = Number(adSettings?.default_ad_rate) || 3
-          await supabase.functions.invoke('ebay-promote-listing', {
-            body: { storeId: singleStore.id, listingId, adRate },
-          })
-        } catch {
-          // Non-fatal — the listing itself published successfully either way.
+  const handlePublish = async () => {
+    if (!singleStore || !product || activeViolation) return
+    setPublishError(null)
+    setPublishSuccess(null)
+    setPromoteNotice(null)
+    const built = buildSinglePayload()
+    if ('error' in built) { setPublishError(built.error); return }
+    const { payload, price: priceToUse } = built
+    const storeId = singleStore.id
+    setPublishing(true)
+
+    try {
+      const listingId = await publishListing(storeId, payload, { skipRefresh: true })
+
+      // Promoted Listings: eBay's own eligibility can still decline this, so a failure here
+      // never fails the publish (the listing is already live) — but the outcome is shown.
+      if (promoted) {
+        if (listingId) {
+          const res = await promoteListing(storeId, listingId, payload.sku, promoteAdRate > 0 ? promoteAdRate : 3)
+          setPromoteNotice({ ok: res.ok, text: res.ok ? res.message : `Listed, but not promoted: ${res.message}` })
+        } else {
+          setPromoteNotice({ ok: false, text: 'Listed, but not promoted: eBay did not return a listing id.' })
         }
       }
 
       setPublishSuccess(`Listed on eBay at ${formatCurrency(priceToUse)}`)
+      // One reload after publish (and the promoted flag) instead of one inside publishListing.
+      refresh()
 
       setTimeout(() => {
-        setPublishSuccess(null)
         setProduct(null)
         setAsin('')
         setItemSpecifics([])
@@ -801,6 +903,58 @@ export default function ListItems() {
       setPublishError(err instanceof Error ? err.message : 'Failed to publish')
     } finally {
       setPublishing(false)
+    }
+  }
+
+  // Saves the reviewed product as a draft row, shaped exactly like the bulk "Add & Save as
+  // Drafts" rows (status 'draft', no ebay_id) so it shows up under Drafts. Publishing a draft
+  // later re-fetches the product and rebuilds description/specifics from Amazon, like bulk drafts.
+  const handleSaveDraft = async () => {
+    if (!singleStore || !product || activeViolation) return
+    setPublishError(null)
+    setPublishSuccess(null)
+    setPromoteNotice(null)
+    const built = buildSinglePayload()
+    if ('error' in built) { setPublishError(built.error); return }
+    const { payload } = built
+    const storeId = singleStore.id
+    setSavingDraft(true)
+    try {
+      const row = {
+        store_id: storeId,
+        ebay_id: null,
+        title: payload.title,
+        asin: payload.sku,
+        amazon_price: numOr(product.price, 0),
+        ebay_price: payload.price,
+        quantity: payload.quantity,
+        status: 'draft',
+        image: payload.image || null,
+        promoted,
+      }
+      const { data: existing, error: findErr } = await supabase
+        .from('listings')
+        .select('id')
+        .eq('store_id', storeId)
+        .eq('asin', payload.sku)
+        .eq('status', 'draft')
+        .limit(1)
+      if (findErr) throw new Error(findErr.message)
+      const existingId = ((existing || []) as Array<{ id: string }>)[0]?.id
+      const { error } = existingId
+        ? await supabase.from('listings').update({ ...row, updated_at: new Date().toISOString() }).eq('id', existingId)
+        : await supabase.from('listings').insert(row)
+      if (error) throw new Error(error.message)
+      setPublishSuccess(existingId ? 'Draft updated — find it under the Drafts tab.' : 'Saved as draft — find it under the Drafts tab.')
+      setTimeout(() => {
+        setProduct(null)
+        setAsin('')
+        setItemSpecifics([])
+      }, 2500)
+    } catch (err) {
+      setPublishError(err instanceof Error ? `Could not save the draft: ${err.message}` : 'Could not save the draft')
+    } finally {
+      setSavingDraft(false)
     }
   }
 
@@ -899,7 +1053,7 @@ export default function ListItems() {
       // this exact batch progress live instead of landing on the flat summary table first.
       setTab('bulk-status')
       setOpenRunId(run.id)
-      setActiveRunIds(prev => [...prev, run.id])
+      updateActiveRunIds(prev => [...prev, run.id])
       // Deliberately NOT awaited: processing continues in the background so the "Add & List
       // All" button on the Bulk tab is usable again immediately, letting another batch be
       // queued right away instead of waiting for this one to finish. Runs process
@@ -907,7 +1061,7 @@ export default function ListItems() {
       // interfere with each other.
       void processBulkRun(run.id)
         .catch(err => setBulkError(err instanceof Error ? err.message : 'Failed to process bulk run'))
-        .finally(() => setActiveRunIds(prev => prev.filter(id => id !== run.id)))
+        .finally(() => updateActiveRunIds(prev => prev.filter(id => id !== run.id)))
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to start bulk run')
     } finally {
@@ -917,13 +1071,13 @@ export default function ListItems() {
 
   const handleResumeBulkRun = async (runId: string) => {
     setBulkError(null)
-    setActiveRunIds(prev => prev.includes(runId) ? prev : [...prev, runId])
+    updateActiveRunIds(prev => prev.includes(runId) ? prev : [...prev, runId])
     try {
       await processBulkRun(runId, { resume: true })
     } catch (err) {
       setBulkError(err instanceof Error ? err.message : 'Failed to process bulk run')
     } finally {
-      setActiveRunIds(prev => prev.filter(id => id !== runId))
+      updateActiveRunIds(prev => prev.filter(id => id !== runId))
     }
   }
 
@@ -937,17 +1091,9 @@ export default function ListItems() {
     }
   }
 
-  // Bulk runs are processed by this browser tab. Warn before the tab is closed or reloaded
-  // while a batch is still running, so it isn't silently left half-finished.
-  useEffect(() => {
-    if (activeRunIds.length === 0) return
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = ''
-    }
-    window.addEventListener('beforeunload', onBeforeUnload)
-    return () => window.removeEventListener('beforeunload', onBeforeUnload)
-  }, [activeRunIds.length])
+  // Bulk runs are processed by this browser tab. The warning before the tab is closed or
+  // reloaded while a batch is still running is registered by updateActiveRunIds (module level),
+  // so it stays active even after leaving this page.
 
   const filteredRuns = useMemo(() => {
     if (statusFilter === 'all') return bulkRuns
@@ -970,50 +1116,193 @@ export default function ListItems() {
 
   const openRun = openRunId ? bulkRuns.find(r => r.id === openRunId) || null : null
 
+  // Drafts belong to a store: they are shown (and published) for the store selected on the
+  // Single / Drafts tab, not whichever store happens to be "active".
+  const draftsStore = singleStore
+  const draftsRequestRef = useRef(0)
+
   const loadDrafts = async () => {
-    if (!activeStore?.id) return
+    if (!draftsStore?.id) return
+    const storeId = draftsStore.id
+    const requestId = ++draftsRequestRef.current
     setDraftsLoading(true)
+    setDraftError(null)
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('listings')
-        .select('id, title, image, ebay_price, asin, quantity')
-        .eq('store_id', activeStore.id)
+        .select('id, title, image, ebay_price, amazon_price, asin, quantity, promoted')
+        .eq('store_id', storeId)
         .eq('status', 'draft')
         .order('created_at', { ascending: false })
-      setDraftListings((data || []) as typeof draftListings)
+      if (requestId !== draftsRequestRef.current) return
+      if (error) throw new Error(error.message)
+      setDraftListings((data || []) as DraftRow[])
+    } catch (err) {
+      if (requestId === draftsRequestRef.current) {
+        setDraftListings([])
+        setDraftError(err instanceof Error ? `Could not load drafts: ${err.message}` : 'Could not load drafts')
+      }
     } finally {
-      setDraftsLoading(false)
+      if (requestId === draftsRequestRef.current) setDraftsLoading(false)
     }
   }
 
   useEffect(() => {
     if (tab === 'drafts') void loadDrafts()
-  }, [tab, activeStore?.id])
+  }, [tab, draftsStore?.id])
 
-  const handlePublishDraft = async (draft: typeof draftListings[number]) => {
-    if (!activeStore || !draft.asin) return
+  // A bulk "Save as Drafts" run remembers its business policies, category, VeRO choice and ad
+  // rate on the bulk_runs row — reuse them when that draft is published.
+  const loadDraftRunSettings = async (storeId: string, asin: string): Promise<{
+    categoryId: string | null
+    allowVero: boolean
+    adRate: number | null
+    policyOverrides?: PublishListingPayload['policyOverrides']
+  } | null> => {
+    const run = bulkRuns
+      .filter(r => r.storeId === storeId && r.draftOnly && r.items.some(i => i.asin === asin && i.status === 'success'))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]
+    if (!run) return null
+    const { data, error } = await supabase
+      .from('bulk_runs')
+      .select('fulfillment_policy_id, payment_policy_id, return_policy_id, category_id, allow_vero, ad_rate')
+      .eq('id', run.id)
+      .maybeSingle()
+    if (error || !data) return null
+    const row = data as {
+      fulfillment_policy_id: string | null; payment_policy_id: string | null; return_policy_id: string | null
+      category_id: string | null; allow_vero: boolean | null; ad_rate: unknown
+    }
+    const hasPolicy = !!(row.fulfillment_policy_id || row.payment_policy_id || row.return_policy_id)
+    const rate = numOr(row.ad_rate, 0)
+    return {
+      categoryId: row.category_id,
+      allowVero: !!row.allow_vero,
+      adRate: rate > 0 ? rate : null,
+      policyOverrides: hasPolicy
+        ? {
+            fulfillmentPolicyId: row.fulfillment_policy_id || undefined,
+            paymentPolicyId: row.payment_policy_id || undefined,
+            returnPolicyId: row.return_policy_id || undefined,
+          }
+        : undefined,
+    }
+  }
+
+  // Publishing a draft rebuilds the whole listing the way the Single tab / bulk do: fresh Amazon
+  // data, the store's CURRENT pricing rules (not the price saved with the draft), images, item
+  // specifics, template description, business policies and amazonPrice. The publish route
+  // creates its own listings row for the new eBay item, so the draft row is removed afterwards.
+  const handlePublishDraft = async (draft: DraftRow) => {
+    const store = draftsStore
+    if (!store || !draft.asin) return
+    const storeId = store.id
+    const asin = draft.asin
     setPublishingDraftId(draft.id)
+    setDraftError(null)
+    setDraftNotice(null)
     try {
-      const product = await fetchAmazonProduct(draft.asin, activeStore.id)
-      await publishListing(activeStore.id, {
-        sku: draft.asin,
-        title: draft.title,
-        price: draft.ebay_price,
-        quantity: draft.quantity,
-        image: draft.image || product.mainImage || '',
-        description: product.description,
+      // The draft row itself carries this ASIN, so amazon-fetch's "already listed" guard has to
+      // be skipped. In that mode amazon-fetch also skips its VeRO keyword block and word
+      // stripping, so both are re-applied below with the store's VeRO settings.
+      const [product, storePricing, storeVero, promoDefaults, template, runSettings] = await Promise.all([
+        fetchAmazonProduct(asin, storeId, { skipDuplicateCheck: true }),
+        loadStorePricing(storeId),
+        loadStoreVero(storeId),
+        loadPromotedDefaults(storeId),
+        loadActiveTemplate(storeId),
+        loadDraftRunSettings(storeId, asin),
+      ])
+
+      if (String(product.stock || '').toLowerCase().includes('out')) {
+        throw new Error('This product is out of stock on Amazon right now — the draft was kept.')
+      }
+
+      const brandName = cleanBrandName(product.brand || '')
+      const wordsToStrip = [...storeVero.removeKeywords, ...(storeVero.autoRemoveBrand && brandName ? [brandName] : [])]
+      const baseTitle = draft.title || product.title || ''
+      const title = truncateTitleTo80(stripWords(baseTitle, wordsToStrip) || baseTitle)
+      const productDescription = stripWords(product.description || '', wordsToStrip)
+      const bullets = (product.bulletPoints || []).map(b => stripWords(b, wordsToStrip)).filter(Boolean)
+
+      if (!runSettings?.allowVero) {
+        const blockWords = storeVero.blockKeywords
+        const checks: Array<{ where: string; text: string; words: string[] }> = [
+          { where: 'title', text: title, words: storeVero.blockInTitle ? [...HARDCODED_BLOCKS, ...blockWords] : HARDCODED_BLOCKS },
+          { where: 'brand', text: `${product.brand || ''} ${brandName}`, words: storeVero.blockInBrand ? blockWords : [] },
+          { where: 'description', text: productDescription, words: storeVero.blockInDescription ? blockWords : [] },
+        ]
+        for (const c of checks) {
+          const hit = findBlockedWord(c.text, c.words)
+          if (hit) throw new Error(`Blocked by VeRO filter: "${hit}" found in the ${c.where} — the draft was kept.`)
+        }
+      }
+
+      const amazonPrice = numOr(product.price, 0)
+      const price = computeListPrice(amazonPrice, numOr(product.suggestedPrice, 0), storePricing)
+      if (!(price > 0)) throw new Error('Could not work out an eBay price (Amazon returned no price) — the draft was kept.')
+
+      const image = product.mainImage || product.images[0] || draft.image || ''
+      const quantity = draft.quantity > 0 ? draft.quantity : (product.defaultQuantity || 1)
+      const description = fitDescriptionToBudget(template, {
+        title,
+        store_name: store.ebayUsername || store.nickname || 'Our Store',
+        main_image: image,
+        gallery: (product.images || []).slice(1, 6),
+        product_description: productDescription,
+        feature_bullets: bullets,
       })
-      await supabase.from('listings').delete().eq('id', draft.id)
-      setDraftListings(prev => prev.filter(d => d.id !== draft.id))
+
+      const payload: PublishListingPayload = {
+        sku: asin,
+        title,
+        price,
+        quantity,
+        image,
+        images: product.images && product.images.length > 0 ? product.images : (image ? [image] : []),
+        description,
+        categoryId: isNumericCategoryId(runSettings?.categoryId) ? String(runSettings?.categoryId).trim() : undefined,
+        policyOverrides: runSettings?.policyOverrides,
+        aspects: productAspects(product),
+        amazonPrice: amazonPrice || undefined,
+      }
+
+      const listingId = await publishListing(storeId, payload, { skipRefresh: true })
+
+      const notes: string[] = [`Published "${title}" at ${formatCurrency(price)}.`]
+
+      const { error: delErr } = await supabase.from('listings').delete().eq('id', draft.id)
+      if (delErr) {
+        setDraftError(`Published on eBay, but the draft row could not be removed (${delErr.message}). Delete it here so it is not published twice.`)
+      } else {
+        setDraftListings(prev => prev.filter(d => d.id !== draft.id))
+      }
+
+      if (draft.promoted ?? promoDefaults.autoPromote) {
+        if (listingId) {
+          const res = await promoteListing(storeId, listingId, asin, runSettings?.adRate ?? promoDefaults.adRate)
+          notes.push(res.ok ? res.message : `Not promoted: ${res.message}`)
+        } else {
+          notes.push('Not promoted: eBay did not return a listing id.')
+        }
+      }
+      setDraftNotice(notes.join(' '))
+      refresh()
     } catch (err) {
-      setBulkError(err instanceof Error ? err.message : 'Failed to publish draft')
+      setDraftError(err instanceof Error ? err.message : 'Failed to publish draft')
     } finally {
       setPublishingDraftId(null)
     }
   }
 
   const handleDeleteDraft = async (draftId: string) => {
-    await supabase.from('listings').delete().eq('id', draftId)
+    setDraftError(null)
+    setDraftNotice(null)
+    const { error } = await supabase.from('listings').delete().eq('id', draftId)
+    if (error) {
+      setDraftError(`Could not delete the draft: ${error.message}`)
+      return
+    }
     setDraftListings(prev => prev.filter(d => d.id !== draftId))
   }
 
@@ -1154,11 +1443,14 @@ export default function ListItems() {
                     <label className="label">Category</label>
                     <div className="flex gap-2">
                       <select className="input flex-1" value={selectedCategory} onChange={e => setSelectedCategory(e.target.value)}>
-                        <option value="">{product.category || 'Choose an eBay category'}</option>
+                        <option value="">Auto-detect eBay category</option>
                         {selectedCategory && <option value={selectedCategory}>{selectedCategoryName || selectedCategory}</option>}
                       </select>
-                      <button onClick={() => setSelectedCategory(detectCategorySuggestion(product))} className="btn-secondary text-xs">Suggest</button>
                     </div>
+                    <p className="mt-1 text-xs text-slate-400">
+                      {product.category ? <>Amazon category: {product.category}. </> : null}
+                      eBay picks the category automatically unless "Generate AI Title" suggests one.
+                    </p>
                   </div>
                 </div>
 
@@ -1205,6 +1497,21 @@ export default function ListItems() {
                   <label htmlFor="promoted" className="text-sm font-medium text-slate-700 cursor-pointer">
                     Add to eBay Promoted Listings
                   </label>
+                  {promoted && (
+                    <div className="flex items-center gap-1.5 ml-auto shrink-0">
+                      <span className="text-xs text-slate-500">Ad rate</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={0.5}
+                        value={promoteAdRate}
+                        onChange={e => setPromoteAdRate(Number(e.target.value))}
+                        className="w-16 input py-1 text-sm text-center"
+                      />
+                      <span className="text-xs text-slate-500">%</span>
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -1260,19 +1567,34 @@ export default function ListItems() {
 
                 <div className="flex gap-3 pt-2">
                   <button
-                    onClick={handlePublish}
-                    disabled={publishing || !!activeViolation}
+                    onClick={() => void handlePublish()}
+                    disabled={publishing || savingDraft || !!activeViolation}
                     className="btn-primary disabled:bg-slate-300 disabled:cursor-not-allowed disabled:border-slate-300"
                   >
                     {publishing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                     {publishing ? 'Publishing...' : 'List It'}
                   </button>
-                  <button className="btn-secondary"><Save className="w-4 h-4" /> Save as Draft</button>
+                  <button
+                    onClick={() => void handleSaveDraft()}
+                    disabled={publishing || savingDraft || !!activeViolation}
+                    className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {savingDraft ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    {savingDraft ? 'Saving...' : 'Save as Draft'}
+                  </button>
                 </div>
 
                 {publishError && <div className="text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">{publishError}</div>}
-                {publishSuccess && <div className="flex items-center gap-2 text-sm text-success-600 bg-success-50 rounded-lg px-4 py-2"><CheckCircle2 className="w-4 h-4 shrink-0" />{publishSuccess}</div>}
               </div>
+            </div>
+          )}
+
+          {/* Outside the product card so the result stays visible after the form resets. */}
+          {publishSuccess && <div className="flex items-center gap-2 text-sm text-success-600 bg-success-50 rounded-lg px-4 py-2"><CheckCircle2 className="w-4 h-4 shrink-0" />{publishSuccess}</div>}
+          {promoteNotice && (
+            <div className={cn('flex items-center gap-2 text-sm rounded-lg px-4 py-2', promoteNotice.ok ? 'text-success-600 bg-success-50' : 'text-amber-700 bg-amber-50')}>
+              {promoteNotice.ok ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+              {promoteNotice.text}
             </div>
           )}
         </div>
@@ -1522,8 +1844,22 @@ export default function ListItems() {
         <div className="card">
           <div className="card-header">
             <h3 className="font-semibold text-slate-900">Drafts</h3>
-            <p className="text-xs text-slate-500 mt-0.5">Saved but not yet live on eBay. Publish when you're ready.</p>
+            <p className="text-xs text-slate-500 mt-0.5">Saved but not yet live on eBay. Publishing re-checks Amazon and prices the item with your current pricing rules.</p>
+            {stores.length > 1 && (
+              <div className="mt-3 max-w-xs">
+                <label className="label">Store</label>
+                <select className="input" value={draftsStore?.id || ''} onChange={e => setSingleStoreId(e.target.value)}>
+                  {stores.map(s => <option key={s.id} value={s.id}>{s.nickname}</option>)}
+                </select>
+              </div>
+            )}
           </div>
+          {(draftError || draftNotice) && (
+            <div className="px-4 pt-3 space-y-2">
+              {draftError && <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2"><AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />{draftError}</div>}
+              {draftNotice && <div className="flex items-start gap-2 text-sm text-success-600 bg-success-50 rounded-lg px-4 py-2"><CheckCircle2 className="w-4 h-4 mt-0.5 shrink-0" />{draftNotice}</div>}
+            </div>
+          )}
           <div className="card-body p-0">
             {draftsLoading ? (
               <div className="p-8 text-center text-sm text-slate-500"><Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />Loading drafts…</div>
@@ -1545,13 +1881,13 @@ export default function ListItems() {
                     <span className="text-sm font-medium text-slate-700 shrink-0">{formatCurrency(d.ebay_price)}</span>
                     <button
                       onClick={() => void handlePublishDraft(d)}
-                      disabled={publishingDraftId === d.id}
+                      disabled={publishingDraftId !== null}
                       className="btn-primary text-xs shrink-0"
                     >
                       {publishingDraftId === d.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
                       Publish
                     </button>
-                    <button onClick={() => void handleDeleteDraft(d.id)} className="p-1.5 text-slate-400 hover:text-red-500 shrink-0" title="Delete draft">
+                    <button onClick={() => void handleDeleteDraft(d.id)} disabled={publishingDraftId === d.id} className="p-1.5 text-slate-400 hover:text-red-500 shrink-0 disabled:opacity-30" title="Delete draft">
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
@@ -1577,8 +1913,8 @@ export default function ListItems() {
 
 // ---- Import: link listings that are already live on eBay to their Amazon ASIN ----
 // Nothing is created or changed on eBay here. The only database change is setting the ASIN on
-// a listing row that eBay itself already reported for the chosen store (the 15-minute
-// "sync-all-listings" job, or "Sync from eBay", creates those rows). An eBay item ID that does
+// a listing row that eBay itself already reported for the chosen store (rows are created when
+// the store's eBay listings are synced, e.g. with "Sync from eBay"). An eBay item ID that does
 // not belong to the chosen store is therefore never linked — no row is ever inserted here.
 
 type ImportRowState =
@@ -1632,7 +1968,7 @@ function detectDelimiter(text: string): string {
   return counts[0].n > 0 ? counts[0].d : ','
 }
 
-// Same quoting rules as parseCsv above, but with a configurable delimiter (Excel in many
+// Standard CSV quoting rules, with a configurable delimiter (Excel in many
 // locales, including Turkish, saves CSV files with ";").
 function parseDelimited(text: string, delimiter: string): string[][] {
   const clean = text.replace(/^﻿/, '')
@@ -1922,9 +2258,9 @@ function ImportPanel() {
         setProgress({ done, total: targets.length })
       })
 
-      // 2) Verify. The background eBay sync (every 15 minutes) rewrites these rows; if it was
-      //    running at the same moment it can put back the old, empty ASIN. Read the rows back a
-      //    few times over ~1.5 minutes and re-apply any ASIN that didn't stick.
+      // 2) Verify. An eBay listing sync running at the same moment can rewrite these rows and
+      //    put back the old, empty ASIN. Read the rows back a few times over ~1.5 minutes and
+      //    re-apply any ASIN that didn't stick.
       const okIds = targets.filter(t => outcome.get(t.ebayId)?.ok).map(t => t.ebayId)
       const wanted = new Map(targets.map(t => [t.ebayId, t.asin]))
       for (const [round, waitMs] of [5000, 40000, 45000].entries()) {
@@ -2090,7 +2426,7 @@ function ImportPanel() {
               <div className="text-sm bg-amber-50 text-amber-800 rounded-lg px-4 py-3 space-y-2">
                 <p>
                   {counts.missing} eBay item ID{counts.missing === 1 ? ' is' : 's are'} not in <b>{store.nickname}</b>. Either they belong to another eBay account
-                  (connect that account and choose it above), or this store hasn't pulled them from eBay yet.
+                  (connect that account and choose it above), or they haven't been synced from eBay yet — eBay listings appear here after they are synced.
                 </p>
                 <button onClick={() => void handleSyncFromEbay()} disabled={busy} className="btn-secondary text-sm">
                   {syncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -2145,7 +2481,7 @@ function ImportPanel() {
             <div className="flex items-center justify-between flex-wrap gap-3 pt-1">
               <p className="text-xs text-slate-500">
                 {linking
-                  ? `${phase}… ${phase === 'Linking' ? `${progress.done}/${progress.total}` : 'making sure a background eBay sync did not undo any link'} — keep this tab open`
+                  ? `${phase}… ${phase === 'Linking' ? `${progress.done}/${progress.total}` : 'making sure every link was saved'} — keep this tab open`
                   : `${selectedCount} row${selectedCount === 1 ? '' : 's'} selected to link`}
               </p>
               <button
