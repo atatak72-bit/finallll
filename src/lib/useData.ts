@@ -1,20 +1,95 @@
-import { useState, useEffect, useCallback } from 'react'
-import { supabase } from './supabase'
-import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice, truncateTitleTo80, sanitizeAspects, extractBasicAspectsFromSpecs } from './utils'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { supabase, authHeaders } from './supabase'
+import { buildTemplateDescription, proxyImageUrls, renderListingTemplate, fitDescriptionToBudget, DEFAULT_LISTING_TEMPLATE, calculateEbayPrice, truncateTitleTo80, sanitizeAspects, extractBasicAspectsFromSpecs, numberOr } from './utils'
 import type {
   EbayTokenRow, ListingRow, OrderRow,
   ConversationRow, MessageRow, RevisionRow, SettingsRow,
   BulkRunRow, BulkRunItemRow,
 } from './supabase'
 // Mock data removed — the app now shows real data from the database or empty states.
-import type { Store, Listing, Order, Conversation, Revision, Message } from '../data/types'
+import type { Store, Listing, ListingStatus, Order, Conversation, Revision, Message } from '../data/types'
 
-// How many bulk items are processed at the same time. Must match the VPS scraper's own
-// MAX_CONCURRENT (its .env) — the VPS server is single-core, so more than 2 browsers running
-// at once starves some of them of CPU time and causes real page-load timeouts, not just a
-// queueing delay. Lower this only if MAX_CONCURRENT is lowered too; raise it only after the
-// VPS is upgraded to more CPU cores.
-const BULK_CONCURRENCY = 2
+// How many bulk items are processed at the same time. amazon-fetch now scrapes through the
+// Webshare proxy pool (AMAZON_PROXIES) instead of the old single-core VPS browser, so the old
+// limit of 2 no longer applies.
+const BULK_CONCURRENCY = 4
+
+// Hard cap for one amazon-fetch or publish call. Without it a hung request froze a bulk worker
+// forever.
+const REQUEST_TIMEOUT_MS = 90_000
+
+// Supabase returns at most 1000 rows per request, so bigger tables are read page by page.
+const DB_PAGE_SIZE = 1000
+
+// Only the non-secret ebay_tokens columns. Never select access_token / refresh_token /
+// token_expires_at here — the browser has no access to those columns.
+export const EBAY_TOKEN_SAFE_COLUMNS = 'id, store_nickname, ebay_username, connected, active, created_at, updated_at, sync_all_page, reconcile_page'
+
+const LISTING_COLUMNS = 'id, store_id, ebay_id, title, asin, amazon_price, ebay_price, quantity, status, image, listed_date, sold_count, promoted, created_at, updated_at, last_stock_check, sku_hint'
+
+export const DEFAULT_UPDATE_REASON = 'Tubika — manuel düzenleme'
+
+// Statuses the DB can hold beyond the base ListingStatus type: 'untracked' = removed from
+// automation (the server tracker only claims active/out_of_stock/unknown rows), 'delisted_cold'
+// = set by the server.
+export type AppListingStatus = ListingStatus | 'untracked' | 'delisted_cold'
+
+// A listing as the app sees it: listedDate is '' when the DB has no listed_date (shown as "—"),
+// skuHint is the SKU eBay has on file for the item ('' if unknown).
+export type AppListing = Omit<Listing, 'status'> & { status: AppListingStatus; skuHint: string }
+
+// The SKU of the eBay inventory item — the same rule the server tracker uses (sku_hint || asin).
+// Never falls back to the eBay item ID: that is not a SKU.
+export function listingSku(l: { asin?: string | null; skuHint?: string | null }): string {
+  return (l.skuHint || l.asin || '').trim()
+}
+
+// Error from an edge-function call. status is the HTTP status, or 0 for network errors/timeouts.
+export class RequestError extends Error {
+  status: number
+  timedOut: boolean
+  constructor(message: string, status: number, timedOut = false) {
+    super(message)
+    this.name = 'RequestError'
+    this.status = status
+    this.timedOut = timedOut
+  }
+}
+
+// POSTs JSON to an edge function as the signed-in user, aborting after timeoutMs.
+async function postJson<T>(url: string, body: unknown, timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<{ ok: boolean; status: number; data: T }> {
+  const headers = { 'Content-Type': 'application/json', ...(await authHeaders()) }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timeoutError = () => new RequestError(`İstek zaman aşımına uğradı (${Math.round(timeoutMs / 1000)} sn)`, 0, true)
+  try {
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
+    const data = await res.json().catch(() => ({})) as T
+    if (controller.signal.aborted) throw timeoutError()
+    return { ok: res.ok, status: res.status, data }
+  } catch (err) {
+    if (err instanceof RequestError) throw err
+    if (controller.signal.aborted) throw timeoutError()
+    throw new RequestError(err instanceof Error ? err.message : 'Network error', 0)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// Reads every row of a query in pages of DB_PAGE_SIZE using .range(), until a short page.
+async function fetchAllRows<T>(
+  build: (from: number, to: number) => PromiseLike<{ data: unknown; error: { message: string } | null }>,
+): Promise<T[]> {
+  const out: T[] = []
+  for (let from = 0; ; from += DB_PAGE_SIZE) {
+    const { data, error } = await build(from, from + DB_PAGE_SIZE - 1)
+    if (error) throw new Error(error.message)
+    const rows = (Array.isArray(data) ? data : []) as T[]
+    out.push(...rows)
+    if (rows.length < DB_PAGE_SIZE) break
+  }
+  return out
+}
 
 export interface UpdateListingPayload {
   sku: string
@@ -23,6 +98,18 @@ export interface UpdateListingPayload {
   quantity?: number
   image?: string
   description?: string
+  // Recorded in the revision history. Filled from the local listing when not given.
+  oldPrice?: number
+  oldQuantity?: number
+  reason?: string
+}
+
+export interface UpdateListingOptions {
+  // Bulk loops pass this and call refresh() once at the end.
+  skipRefresh?: boolean
+  // The listings row to update locally and in the DB after eBay accepts the change. When
+  // omitted, the row is looked up by SKU.
+  listingId?: string
 }
 
 export interface PublishListingPayload {
@@ -48,7 +135,9 @@ export interface BulkRunItem {
   asin: string
   customTitle: string | null
   title: string | null
-  status: 'pending' | 'success' | 'failed'
+  // 'processing' = publish was started; on Resume it is checked against the listings table
+  // before anything is published again.
+  status: 'pending' | 'processing' | 'success' | 'failed'
   error: string | null
   image: string | null
   amazonPrice: number
@@ -110,20 +199,23 @@ export interface AmazonProduct {
 
 export interface DataContextValue {
   stores: Store[]
-  listings: Listing[]
+  listings: AppListing[]
   orders: Order[]
   conversations: Conversation[]
   revisions: Revision[]
   loading: boolean
+  // Set when the last refresh() could not load (part of) the data — show it instead of an
+  // empty list.
+  loadError: string | null
   connected: boolean
   oauthProcessing: boolean
   oauthError: string | null
   refresh: () => void
   syncStore: (storeId: string) => Promise<void>
   disconnectStore: (storeId: string) => Promise<void>
-  updateListing: (storeId: string, payload: UpdateListingPayload) => Promise<void>
-  publishListing: (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean }) => Promise<string>
-  fetchAmazonProduct: (input: string, storeId?: string, opts?: { allowVero?: boolean }) => Promise<AmazonProduct>
+  updateListing: (storeId: string, payload: UpdateListingPayload, opts?: UpdateListingOptions) => Promise<void>
+  publishListing: (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean; timeoutMs?: number }) => Promise<string>
+  fetchAmazonProduct: (input: string, storeId?: string, opts?: { allowVero?: boolean; skipDuplicateCheck?: boolean; timeoutMs?: number }) => Promise<AmazonProduct>
   bulkRuns: BulkRun[]
   createBulkRun: (input: CreateBulkRunInput) => Promise<BulkRun>
   processBulkRun: (runId: string, opts?: { resume?: boolean }) => Promise<void>
@@ -145,7 +237,7 @@ function mapTokenToStore(t: EbayTokenRow): Store {
   }
 }
 
-function mapListingRow(l: ListingRow): Listing {
+function mapListingRow(l: ListingRow): AppListing {
   return {
     id: l.id,
     ebayId: l.ebay_id || '',
@@ -154,16 +246,17 @@ function mapListingRow(l: ListingRow): Listing {
     amazonPrice: Number(l.amazon_price) || 0,
     ebayPrice: Number(l.ebay_price) || 0,
     quantity: l.quantity || 0,
-    status: (l.status as Listing['status']) || 'unknown',
+    status: (l.status || 'unknown') as AppListingStatus,
     image: l.image || '',
     storeId: l.store_id,
-    listedDate: l.listed_date || new Date().toISOString(),
+    // No listed_date stays empty (shown as "—", sorted last) instead of pretending it's "now".
+    listedDate: l.listed_date || '',
     soldCount: l.sold_count || 0,
     promoted: l.promoted || false,
-    // last_stock_check comes from ebay-stock-sync's periodic price/quantity checks.
-    // Cast used in case the local ListingRow type hasn't been updated to declare this
-    // column yet — the column itself already exists on the table (select('*') returns it).
-    checkedDate: (l as unknown as { last_stock_check?: string | null }).last_stock_check || null,
+    // last_stock_check is written by the server tracker (Webshare proxy scraper) every time it
+    // checks this listing's Amazon price/stock.
+    checkedDate: l.last_stock_check || null,
+    skuHint: l.sku_hint || '',
   }
 }
 
@@ -242,7 +335,7 @@ function mapRevisionRow(r: RevisionRow): Revision {
 // Errors that mean "a rule worked as intended" (VeRO, Prime/FBA, rating, stock, duplicate,
 // eBay policy blocks) rather than a technical failure. Shared by the Bulk Status screen (to put
 // these under "Blocked") and by Resume (which no longer re-fetches items that will only be
-// blocked again — that just burned proxy/VPS time).
+// blocked again — that just burned proxy time).
 const BLOCKED_ERROR_PATTERN = /blocked by vero|filtered out|not fulfilled by amazon|fba-only|not prime|prime only|prime filter|not prime-eligible|out of stock|already listed|allow duplicate|errorId":25019|improper words|violation of ebay policy|not permitted to be listed/i
 
 export function isBlockedBulkError(error: string | null | undefined): boolean {
@@ -277,6 +370,18 @@ function findBlockedWord(text: string, words: string[]): string | null {
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+// amazon-fetch failures worth one more try: network errors, timeouts, 5xx and scrape problems
+// (captcha, proxy, page didn't load). Filter / VeRO / duplicate rejections are final.
+const NON_RETRYABLE_AMAZON_ERROR = /vero|filter|duplicate|already listed|blocked|prime|fba|rating|review|out of stock|oturum/i
+const SCRAPE_AMAZON_ERROR = /scrap|captcha|robot|proxy|timeout|timed out|zaman aşımı|network|failed to fetch|could not be fetched|econn|socket|502|503|504/i
+
+function isRetryableAmazonError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (isBlockedBulkError(msg) || NON_RETRYABLE_AMAZON_ERROR.test(msg)) return false
+  if (err instanceof RequestError && (err.timedOut || err.status === 0 || err.status >= 500)) return true
+  return SCRAPE_AMAZON_ERROR.test(msg)
+}
 
 // eBay treats any listing that carries an "EPA Registration Number" item specific as a
 // pesticide and rejects it outside pesticide categories (errorId 25019). Drop that field unless
@@ -332,104 +437,155 @@ function mapBulkRunItemRow(i: BulkRunItemRow): BulkRunItem {
 
 export function useData(): DataContextValue {
   const [stores, setStores] = useState<Store[]>([])
-  const [listings, setListings] = useState<Listing[]>([])
+  const [listings, setListings] = useState<AppListing[]>([])
   const [orders, setOrders] = useState<Order[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [revisions, setRevisions] = useState<Revision[]>([])
   const [bulkRuns, setBulkRuns] = useState<BulkRun[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [oauthProcessing, setOauthProcessing] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
 
+  // Latest listings for callbacks that must not be re-created on every change (updateListing).
+  const listingsRef = useRef<AppListing[]>([])
+  useEffect(() => { listingsRef.current = listings }, [listings])
+
   const refresh = useCallback(async () => {
     setLoading(true)
+    // Problems with secondary data (messages, revisions, bulk runs) are collected and shown;
+    // a failure loading stores/listings/orders aborts the refresh and keeps the old data.
+    const problems: string[] = []
 
-    const { data: tokenRows } = await supabase.from('ebay_tokens').select('*').order('created_at', { ascending: true })
-    if (tokenRows && tokenRows.length > 0) {
-      setConnected(true)
-      const mappedStores = tokenRows.map(mapTokenToStore)
-      setStores(mappedStores)
+    try {
+      const { data: tokenData, error: tokenErr } = await supabase
+        .from('ebay_tokens')
+        .select(EBAY_TOKEN_SAFE_COLUMNS)
+        .order('created_at', { ascending: true })
+      if (tokenErr) throw new Error(`Mağazalar yüklenemedi: ${tokenErr.message}`)
+      const tokenRows = (tokenData || []) as unknown as EbayTokenRow[]
 
-      const activeStore = mappedStores.find(s => s.active) || mappedStores[0]
-      const storeId = activeStore.id
+      if (tokenRows.length > 0) {
+        setConnected(true)
+        const mappedStores = tokenRows.map(mapTokenToStore)
+        setStores(mappedStores)
 
-      const [listingsRes, ordersRes, convRes, revRes] = await Promise.all([
-        supabase.from('listings').select('*').eq('store_id', storeId).order('listed_date', { ascending: false }),
-        supabase.from('orders').select('*').eq('store_id', storeId).order('order_date', { ascending: false }),
-        supabase.from('conversations').select('*').eq('store_id', storeId).order('last_message_date', { ascending: false }),
-        supabase.from('revisions').select('*').eq('store_id', storeId).order('date', { ascending: false }).limit(50),
-      ])
+        const activeStore = mappedStores.find(s => s.active) || mappedStores[0]
+        const storeId = activeStore.id
 
-      // Match each order back to the listing it belongs to via the eBay item ID (not ASIN —
-      // many listings have no ASIN at all, e.g. ones synced in from eBay rather than published
-      // through this app, but every listing does have an ebay_id). This gives Sold count and
-      // Last Sale date without depending on listings.sold_count, which nothing ever updates.
-      const rawOrders = ordersRes.data || []
-      const salesByItemId = new Map<string, { count: number; lastDate: string }>()
-      for (const o of rawOrders) {
-        const itemId = (o as unknown as { ebay_item_id?: string | null }).ebay_item_id
-        if (!itemId) continue
-        const date = o.order_date || ''
-        const existing = salesByItemId.get(itemId)
-        if (!existing) {
-          salesByItemId.set(itemId, { count: 1, lastDate: date })
-        } else {
-          existing.count += 1
-          if (date > existing.lastDate) existing.lastDate = date
-        }
-      }
-
-      const mappedListings = (listingsRes.data || []).map(mapListingRow).map(l => {
-        const sale = l.ebayId ? salesByItemId.get(l.ebayId) : undefined
-        return sale ? { ...l, soldCount: sale.count, lastSaleDate: sale.lastDate } : l
-      })
-
-      setListings(mappedListings)
-      setOrders(rawOrders.map(mapOrderRow))
-
-      const bulkRunsRes = await supabase.from('bulk_runs').select('*').eq('store_id', storeId).order('created_at', { ascending: false })
-      const bulkRunRows = bulkRunsRes.data || []
-      const bulkRunsWithItems = await Promise.all(
-        bulkRunRows.map(async (run) => {
-          const { data: items } = await supabase.from('bulk_run_items').select('*').eq('run_id', run.id).order('created_at', { ascending: true })
-          return mapBulkRunRow(run, items || [])
-        })
-      )
-      setBulkRuns(bulkRunsWithItems)
-
-      const convsWithMessages = await Promise.all(
-        (convRes.data || []).map(async (conv) => {
-          const { data: msgs } = await supabase
-            .from('messages')
+        const [listingRows, rawOrders, convRes, revRes] = await Promise.all([
+          fetchAllRows<ListingRow>((from, to) => supabase
+            .from('listings')
+            .select(LISTING_COLUMNS)
+            .eq('store_id', storeId)
+            .order('listed_date', { ascending: false, nullsFirst: false })
+            .order('id', { ascending: true })
+            .range(from, to))
+            .catch((err: unknown) => { throw new Error(`İlanlar yüklenemedi: ${err instanceof Error ? err.message : String(err)}`) }),
+          fetchAllRows<OrderRow>((from, to) => supabase
+            .from('orders')
             .select('*')
-            .eq('conversation_id', conv.id)
-            .order('date', { ascending: true })
-          return mapConversationRow(conv, msgs || [])
-        })
-      )
-      setConversations(convsWithMessages)
-      setRevisions((revRes.data || []).map(mapRevisionRow))
-    } else {
-      setConnected(false)
-      setStores([])
-      setListings([])
-      setOrders([])
-      setConversations([])
-      setRevisions([])
-      setBulkRuns([])
-    }
+            .eq('store_id', storeId)
+            .order('order_date', { ascending: false })
+            .order('id', { ascending: true })
+            .range(from, to))
+            .catch((err: unknown) => { throw new Error(`Siparişler yüklenemedi: ${err instanceof Error ? err.message : String(err)}`) }),
+          supabase.from('conversations').select('*').eq('store_id', storeId).order('last_message_date', { ascending: false }),
+          supabase.from('revisions').select('*').eq('store_id', storeId).order('date', { ascending: false }).limit(50),
+        ])
 
-    setLoading(false)
+        // Match each order back to the listing it belongs to via the eBay item ID (not ASIN —
+        // many listings have no ASIN at all, e.g. ones synced in from eBay rather than published
+        // through this app, but every listing does have an ebay_id). This gives Sold count and
+        // Last Sale date without depending on listings.sold_count, which nothing ever updates.
+        const salesByItemId = new Map<string, { count: number; lastDate: string }>()
+        for (const o of rawOrders) {
+          const itemId = (o as unknown as { ebay_item_id?: string | null }).ebay_item_id
+          if (!itemId) continue
+          const date = o.order_date || ''
+          const existing = salesByItemId.get(itemId)
+          if (!existing) {
+            salesByItemId.set(itemId, { count: 1, lastDate: date })
+          } else {
+            existing.count += 1
+            if (date > existing.lastDate) existing.lastDate = date
+          }
+        }
+
+        const mappedListings = listingRows.map(mapListingRow).map(l => {
+          const sale = l.ebayId ? salesByItemId.get(l.ebayId) : undefined
+          return sale ? { ...l, soldCount: sale.count, lastSaleDate: sale.lastDate } : l
+        })
+
+        setListings(mappedListings)
+        setOrders(rawOrders.map(mapOrderRow))
+
+        const bulkRunsRes = await supabase.from('bulk_runs').select('*').eq('store_id', storeId).order('created_at', { ascending: false })
+        if (bulkRunsRes.error) problems.push(`Toplu işlemler yüklenemedi: ${bulkRunsRes.error.message}`)
+        const bulkRunRows = (bulkRunsRes.data || []) as BulkRunRow[]
+        let bulkItemsFailed = false
+        const bulkRunsWithItems = await Promise.all(
+          bulkRunRows.map(async (run) => {
+            try {
+              const items = await fetchAllRows<BulkRunItemRow>((from, to) => supabase
+                .from('bulk_run_items')
+                .select('*')
+                .eq('run_id', run.id)
+                .order('created_at', { ascending: true })
+                .order('id', { ascending: true })
+                .range(from, to))
+              return mapBulkRunRow(run, items)
+            } catch {
+              bulkItemsFailed = true
+              return mapBulkRunRow(run, [])
+            }
+          })
+        )
+        if (bulkItemsFailed) problems.push('Bazı toplu işlem kalemleri yüklenemedi.')
+        setBulkRuns(bulkRunsWithItems)
+
+        if (convRes.error) problems.push(`Mesajlar yüklenemedi: ${convRes.error.message}`)
+        let messagesFailed = false
+        const convsWithMessages = await Promise.all(
+          ((convRes.data || []) as ConversationRow[]).map(async (conv) => {
+            const { data: msgs, error: msgErr } = await supabase
+              .from('messages')
+              .select('*')
+              .eq('conversation_id', conv.id)
+              .order('date', { ascending: true })
+            if (msgErr) messagesFailed = true
+            return mapConversationRow(conv, (msgs || []) as MessageRow[])
+          })
+        )
+        if (messagesFailed) problems.push('Bazı mesaj içerikleri yüklenemedi.')
+        setConversations(convsWithMessages)
+        if (revRes.error) problems.push(`Revizyonlar yüklenemedi: ${revRes.error.message}`)
+        setRevisions(((revRes.data || []) as RevisionRow[]).map(mapRevisionRow))
+      } else {
+        setConnected(false)
+        setStores([])
+        setListings([])
+        setOrders([])
+        setConversations([])
+        setRevisions([])
+        setBulkRuns([])
+      }
+      setLoadError(problems.length > 0 ? problems.join(' · ') : null)
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : 'Veriler yüklenemedi')
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   const syncStore = useCallback(async (storeId: string) => {
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
     const syncUrl = `${supabaseUrl}/functions/v1/ebay-sync`
     const responses = await Promise.all([
-      fetch(`${syncUrl}/listings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storeId }) }),
-      fetch(`${syncUrl}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storeId }) }),
-      fetch(`${syncUrl}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ storeId }) }),
+      fetch(`${syncUrl}/listings`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ storeId }) }),
+      fetch(`${syncUrl}/orders`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ storeId }) }),
+      fetch(`${syncUrl}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(await authHeaders()) }, body: JSON.stringify({ storeId }) }),
     ])
 
     const failedResponse = responses.find(response => !response.ok)
@@ -446,7 +602,7 @@ export function useData(): DataContextValue {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        ...(await authHeaders()),
       },
       body: JSON.stringify({ storeId }),
     })
@@ -461,18 +617,16 @@ export function useData(): DataContextValue {
     await refresh()
   }, [refresh])
 
-  const fetchAmazonProduct = useCallback(async (input: string, storeId?: string, opts?: { allowVero?: boolean }): Promise<AmazonProduct> => {
-    const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/amazon-fetch`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ asin: input, store_id: storeId, ...(opts?.allowVero ? { allow_vero: true } : {}) }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; product?: AmazonProduct; error?: string }
+  const fetchAmazonProduct = useCallback(async (input: string, storeId?: string, opts?: { allowVero?: boolean; skipDuplicateCheck?: boolean; timeoutMs?: number }): Promise<AmazonProduct> => {
+    type AmazonFetchResponse = { success?: boolean; product?: AmazonProduct; error?: string }
+    const res = await postJson<AmazonFetchResponse | null>(
+      `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/amazon-fetch`,
+      { asin: input, store_id: storeId, ...(opts?.allowVero ? { allow_vero: true } : {}), ...(opts?.skipDuplicateCheck ? { skip_duplicate_check: true } : {}) },
+      opts?.timeoutMs ?? REQUEST_TIMEOUT_MS,
+    )
+    const data: AmazonFetchResponse = res.data ?? {}
     if (!res.ok || !data.success || !data.product) {
-      throw new Error(data.error || 'Amazon product could not be fetched')
+      throw new RequestError(data.error || `Amazon product could not be fetched (HTTP ${res.status})`, res.status)
     }
     const proxiedImages = await proxyImageUrls(data.product.images || [])
     return {
@@ -482,15 +636,16 @@ export function useData(): DataContextValue {
     }
   }, [])
 
-  const publishListing = useCallback(async (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean }) => {
+  const publishListing = useCallback(async (storeId: string, payload: PublishListingPayload, opts?: { skipRefresh?: boolean; timeoutMs?: number }) => {
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/publish`
-    const res = await fetch(syncUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify({ storeId, ...payload, route: 'publish' }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; listingId?: string; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to publish listing to eBay')
+    type PublishResponse = { success?: boolean; listingId?: string; error?: string }
+    const res = await postJson<PublishResponse | null>(
+      syncUrl,
+      { storeId, ...payload, route: 'publish' },
+      opts?.timeoutMs ?? REQUEST_TIMEOUT_MS,
+    )
+    const data: PublishResponse = res.data ?? {}
+    if (!res.ok || !data.success) throw new RequestError(data.error || `Failed to publish listing to eBay (HTTP ${res.status})`, res.status)
     // Bulk runs skip this and refresh once at the very end — reloading the whole app's data
     // (listings, orders, every conversation's messages, every bulk run's items) after EVERY
     // single published item was a large hidden delay per item.
@@ -557,8 +712,13 @@ export function useData(): DataContextValue {
       throw new Error('This batch is still being processed (maybe in another tab). Wait a few minutes, then press Resume again.')
     }
 
-    const { data: itemRows } = await supabase.from('bulk_run_items').select('*').eq('run_id', runId).order('created_at', { ascending: true })
-    const items = (itemRows || []) as BulkRunItemRow[]
+    const items = await fetchAllRows<BulkRunItemRow>((from, to) => supabase
+      .from('bulk_run_items')
+      .select('*')
+      .eq('run_id', runId)
+      .order('created_at', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, to))
 
     let blockKeywords: string[] = ['amazon', 'amazon basics', 'amazonbasics', 'fulfilled by amazon']
     if (!run.allow_vero) {
@@ -602,8 +762,8 @@ export function useData(): DataContextValue {
       supabase.from('pricing_rules').select('min_price, max_price, profit_pct, fixed_profit').eq('store_id', run.store_id).order('sort_order', { ascending: true }),
     ])
     const bulkPricingEnabled = bulkPricingSettingsRes.data?.pricing_enabled ?? true
-    const bulkEbayFeePct = Number(bulkPricingSettingsRes.data?.ebay_percentage_fee) || 13.25
-    const bulkEbayFixedFee = Number(bulkPricingSettingsRes.data?.ebay_fixed_fee) || 0.30
+    const bulkEbayFeePct = numberOr(bulkPricingSettingsRes.data?.ebay_percentage_fee, 13.25)
+    const bulkEbayFixedFee = numberOr(bulkPricingSettingsRes.data?.ebay_fixed_fee, 0.30)
     const bulkPricingTiers = (bulkPricingRulesRes.data || []).map(r => ({
       min: Number(r.min_price) || 0,
       max: Number(r.max_price) || 999999,
@@ -619,14 +779,47 @@ export function useData(): DataContextValue {
     let succeeded = items.filter(i => i.status === 'success').length
     let failed = 0
 
+    // The eBay item ID of a listing for this ASIN that was published at/after this bulk item was
+    // created (i.e. by this run), or null. Used when a publish's outcome is unknown (timeout,
+    // network drop, a tab closed mid-publish) so the item is never published twice.
+    const findPublishedListing = async (asin: string, since: string): Promise<string | null> => {
+      const candidates = Array.from(new Set([asin, asin.toUpperCase()].filter(Boolean)))
+      if (candidates.length === 0) return null
+      const { data, error } = await supabase
+        .from('listings')
+        .select('ebay_id')
+        .eq('store_id', run.store_id)
+        .in('asin', candidates)
+        .not('ebay_id', 'is', null)
+        .gte('created_at', since)
+        .limit(1)
+      if (error || !Array.isArray(data) || data.length === 0) return null
+      const ebayId = (data[0] as { ebay_id?: string | null }).ebay_id
+      return ebayId || null
+    }
+
+    // amazon-fetch with one retry on network/timeout/5xx/scrape errors (never on filter, VeRO
+    // or duplicate rejections — those would only be rejected again).
+    const fetchProductWithRetry = async (asin: string): Promise<AmazonProduct> => {
+      const fetchOpts = { allowVero: !!run.allow_vero, timeoutMs: REQUEST_TIMEOUT_MS }
+      try {
+        return await fetchAmazonProduct(asin, run.store_id, fetchOpts)
+      } catch (err) {
+        if (!isRetryableAmazonError(err)) throw err
+        await sleep(3000)
+        return await fetchAmazonProduct(asin, run.store_id, fetchOpts)
+      }
+    }
+
     const processItem = async (item: BulkRunItemRow): Promise<void> => {
       let processedStatus: BulkRunItem['status'] = 'failed'
       let processedTitle: string | null = item.title
       let processedImage: string | null = item.image
       let processedError: string | null = null
+      let promoteNote: string | null = null
 
       try {
-        const product = await fetchAmazonProduct(item.asin, run.store_id, { allowVero: !!run.allow_vero })
+        const product = await fetchProductWithRetry(item.asin)
         // eBay item titles are capped at 80 characters — the bulk pipeline previously sent
         // the raw, often much longer, Amazon title straight through unlike the Single tab
         // (which already truncates). Apply the same word-safe cap here for both a custom
@@ -734,30 +927,56 @@ export function useData(): DataContextValue {
             aspects: sanitizeAspects(withoutPlaceholderEpa({ ...extractBasicAspectsFromSpecs(product.specs), ...(aspects || {}) })),
             amazonPrice: product.price,
           }
+          // Mark the item as being published. If this tab dies mid-publish, Resume sees
+          // 'processing' and checks the listings table before publishing it again.
+          await supabase.from('bulk_run_items').update({ status: 'processing', title, image }).eq('id', item.id)
+
           // eBay's temporary errors (25001 "system error", 25604 "... not found" right after the
           // item is created) usually clear within seconds. Retry those up to 2 more times; the
           // publish route reuses the offer it already created, so a retry never duplicates it.
+          // A timeout / dropped connection means the outcome is unknown: check whether the
+          // listing now exists before doing anything else.
           let ebayListingId = ''
           for (let attempt = 1; ; attempt++) {
             try {
-              ebayListingId = await publishListing(run.store_id, publishPayload, { skipRefresh: true })
+              ebayListingId = await publishListing(run.store_id, publishPayload, { skipRefresh: true, timeoutMs: REQUEST_TIMEOUT_MS })
               break
             } catch (publishErr) {
               const msg = publishErr instanceof Error ? publishErr.message : String(publishErr)
+              if (publishErr instanceof RequestError && (publishErr.timedOut || publishErr.status === 0)) {
+                await sleep(5000)
+                const existing = await findPublishedListing(product.asin || item.asin, item.created_at)
+                if (existing) { ebayListingId = existing; break }
+                if (publishErr.timedOut || attempt >= 3) throw publishErr
+                await sleep(attempt * 4000)
+                continue
+              }
               if (attempt >= 3 || !isTransientPublishError(msg)) throw publishErr
               await sleep(attempt * 4000)
             }
           }
 
           // Promoted Listings: best-effort — eBay eligibility (sales history, category, etc.)
-          // can reject this even when the call itself succeeds, so failures here never fail the item.
+          // can reject this, so a failure never fails the item; it is noted in the item's error
+          // text instead. functions.invoke doesn't throw on a failed call, so check the result.
           if (run.promoted && ebayListingId) {
             try {
-              await supabase.functions.invoke('ebay-promote-listing', {
+              const { data: promoData, error: promoErr } = await supabase.functions.invoke('ebay-promote-listing', {
                 body: { storeId: run.store_id, listingId: ebayListingId, adRate: Number(run.ad_rate) || 3 },
               })
-            } catch {
-              // Non-fatal — the listing itself published successfully.
+              const promo = (promoData || {}) as { success?: boolean; error?: string }
+              if (promoErr || !promo.success) {
+                promoteNote = `Promote başarısız: ${promo.error || promoErr?.message || 'bilinmeyen hata'}`
+              } else {
+                const { error: flagErr } = await supabase
+                  .from('listings')
+                  .update({ promoted: true })
+                  .eq('store_id', run.store_id)
+                  .eq('ebay_id', ebayListingId)
+                if (flagErr) promoteNote = `Promote edildi, ancak ilan kaydı güncellenemedi: ${flagErr.message}`
+              }
+            } catch (promoteErr) {
+              promoteNote = `Promote başarısız: ${promoteErr instanceof Error ? promoteErr.message : String(promoteErr)}`
             }
           }
         }
@@ -768,7 +987,9 @@ export function useData(): DataContextValue {
           image,
           amazon_price: product.price,
           ebay_price: price,
+          error: promoteNote,
         }).eq('id', item.id)
+        processedError = promoteNote
 
         succeeded++
         processedStatus = 'success'
@@ -807,11 +1028,27 @@ export function useData(): DataContextValue {
     // retrying them only re-fetches Amazon to get blocked again. They still count as failed.
     const blockedCount = items.filter(i => i.status === 'failed' && isBlockedBulkError(i.error)).length
     failed = blockedCount
-    const toRetry = items.filter(i => i.status === 'pending' || (i.status === 'failed' && !isBlockedBulkError(i.error)))
+    // 'processing' items were mid-publish when an earlier run stopped: if the listing exists now,
+    // they are marked success instead of being published a second time.
+    const toRetry = items.filter(i => i.status === 'pending' || i.status === 'processing' || (i.status === 'failed' && !isBlockedBulkError(i.error)))
+    const settleProcessingItem = async (item: BulkRunItemRow): Promise<boolean> => {
+      const existing = await findPublishedListing(item.asin, item.created_at)
+      if (!existing) return false
+      const { error: settleErr } = await supabase.from('bulk_run_items').update({ status: 'success', error: null }).eq('id', item.id)
+      if (settleErr) return false
+      succeeded++
+      setBulkRuns(prev => prev.map(r =>
+        r.id === runId
+          ? { ...r, succeeded, items: r.items.map(i => i.id === item.id ? { ...i, status: 'success' as const, error: null } : i) }
+          : r
+      ))
+      return true
+    }
     let cursor = 0
     const worker = async () => {
       while (cursor < toRetry.length) {
         const item = toRetry[cursor++]
+        if ((item.status === 'processing' || (item.status === 'failed' && /zaman aşımı|timed out|timeout/i.test(item.error || ''))) && await settleProcessingItem(item)) continue
         await processItem(item)
       }
     }
@@ -892,7 +1129,7 @@ export function useData(): DataContextValue {
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/end-listing`
     const res = await fetch(syncUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()), },
       body: JSON.stringify({ storeId, listingId, sku, route: 'end-listing' }),
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
@@ -904,10 +1141,13 @@ export function useData(): DataContextValue {
     if (!opts?.skipRefresh) await refresh()
   }, [refresh])
 
+  // "Remove from automation only": the row is kept but marked 'untracked'. Deleting it made the
+  // next eBay sync import it again as a fresh, tracked listing; the server tracker only claims
+  // rows whose status is active / out_of_stock / unknown, so 'untracked' rows are left alone.
   const removeListingLocal = useCallback(async (listingId: string) => {
-    const { error } = await supabase.from('listings').delete().eq('id', listingId)
+    const { error } = await supabase.from('listings').update({ status: 'untracked' }).eq('id', listingId)
     if (error) throw new Error(error.message)
-    setListings(prev => prev.filter(l => l.id !== listingId))
+    setListings(prev => prev.map(l => l.id === listingId ? { ...l, status: 'untracked' as const } : l))
   }, [])
 
   const syncAllEbayListings = useCallback(async (storeId: string) => {
@@ -925,7 +1165,7 @@ export function useData(): DataContextValue {
       safetyCounter++
       const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+        headers: { 'Content-Type': 'application/json', ...(await authHeaders()), },
         body: JSON.stringify({ storeId, route: 'sync-all-listings', startPage: page }),
       })
       const data = await res.json().catch(() => ({})) as {
@@ -951,16 +1191,47 @@ export function useData(): DataContextValue {
     setOrders(prev => prev.map(o => o.id === orderId ? { ...o, notes } : o))
   }, [])
 
-  const updateListing = useCallback(async (storeId: string, payload: UpdateListingPayload) => {
+  const updateListing = useCallback(async (storeId: string, payload: UpdateListingPayload, opts?: UpdateListingOptions) => {
+    // The local row this change is for: by ID when the caller knows it, else by SKU.
+    const current = opts?.listingId
+      ? listingsRef.current.find(l => l.id === opts.listingId)
+      : listingsRef.current.find(l => l.storeId === storeId && !!payload.sku && listingSku(l) === payload.sku)
+
+    const body: UpdateListingPayload = {
+      ...payload,
+      reason: payload.reason || DEFAULT_UPDATE_REASON,
+      ...(payload.price !== undefined && payload.oldPrice === undefined && current ? { oldPrice: current.ebayPrice } : {}),
+      ...(payload.quantity !== undefined && payload.oldQuantity === undefined && current ? { oldQuantity: current.quantity } : {}),
+    }
+
     const syncUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/update-listing`
-    const res = await fetch(syncUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
-      body: JSON.stringify({ storeId, ...payload, route: 'update-listing' }),
-    })
-    const data = await res.json().catch(() => ({})) as { success?: boolean; error?: string }
-    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update listing on eBay')
-    await refresh()
+    const res = await postJson<{ success?: boolean; error?: string } | null>(syncUrl, { storeId, ...body, route: 'update-listing' })
+    const data: { success?: boolean; error?: string } = res.data ?? {}
+    if (!res.ok || !data.success) throw new RequestError(data.error || `Failed to update listing on eBay (HTTP ${res.status})`, res.status)
+
+    // eBay accepted the change — mirror it locally and in our own listings row right away
+    // instead of waiting for the next tracker cycle.
+    const rowId = opts?.listingId || current?.id
+    if (rowId) {
+      const patch: { ebay_price?: number; quantity?: number; title?: string } = {}
+      if (payload.price !== undefined) patch.ebay_price = payload.price
+      if (payload.quantity !== undefined) patch.quantity = payload.quantity
+      if (payload.title !== undefined) patch.title = payload.title
+      setListings(prev => prev.map(l => l.id === rowId
+        ? {
+            ...l,
+            ...(payload.price !== undefined ? { ebayPrice: payload.price } : {}),
+            ...(payload.quantity !== undefined ? { quantity: payload.quantity } : {}),
+            ...(payload.title !== undefined ? { title: payload.title } : {}),
+          }
+        : l))
+      if (Object.keys(patch).length > 0) {
+        const { error: dbErr } = await supabase.from('listings').update(patch).eq('id', rowId)
+        if (dbErr) throw new Error(`eBay güncellendi, ancak veritabanı kaydı yazılamadı: ${dbErr.message}`)
+      }
+    }
+
+    if (!opts?.skipRefresh) await refresh()
   }, [refresh])
 
   // Handle eBay OAuth redirect — runs on every page load, not just when modal is open
@@ -985,7 +1256,7 @@ export function useData(): DataContextValue {
           const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-oauth/callback`, {
             method: 'POST',
             headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+              ...(await authHeaders()),
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ code, storeNickname: nickname }),
@@ -1000,7 +1271,7 @@ export function useData(): DataContextValue {
           void fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/ebay-sync/sync-all-listings`, {
             method: 'POST',
             headers: {
-              Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+              ...(await authHeaders()),
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({ storeId: data.store!.id, route: 'sync-all-listings' }),
@@ -1022,5 +1293,5 @@ export function useData(): DataContextValue {
     refresh()
   }, [refresh])
 
-  return { stores, listings, orders, conversations, revisions, loading, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings, updateOrderNotes }
+  return { stores, listings, orders, conversations, revisions, loading, loadError, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings, updateOrderNotes }
 }

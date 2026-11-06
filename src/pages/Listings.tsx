@@ -10,25 +10,40 @@ import { StatusBadge } from '../components/Badges'
 import { EmptyState } from '../components/UI'
 import { useStoreData } from '../lib/DataContext'
 import { supabase } from '../lib/supabase'
-import { formatCurrency, cn, calculateEbayPrice } from '../lib/utils'
-import type { ListingStatus } from '../data/types'
+import { formatCurrency, cn, calculateEbayPrice, numberOr } from '../lib/utils'
+import { listingSku, type AppListing, type AppListingStatus, type AmazonProduct } from '../lib/useData'
 
 const PAGE_SIZE_OPTIONS = [50, 100] as const
+
+// Used only when a store has no saved pricing_settings row at all.
+const DEFAULT_PCT_FEE = 13.25
+const DEFAULT_FIXED_FEE = 0.30
+
+type StatusFilter = AppListingStatus | 'all'
+
+// Outcome of a bulk action, shown as "X / N başarısız" with the full failure list expandable.
+interface BulkResult {
+  action: string
+  total: number
+  failures: string[]
+  skipped: string[]
+}
 
 // Real, net profit % after eBay's own cut — not just how much higher the eBay price is than
 // the Amazon cost. eBay takes a percentage fee plus a fixed fee out of the sale price before
 // any of it reaches the seller, so a listing marked up +80% can still net well under that once
-// eBay's cut is subtracted; this uses the exact same formula as the order-profit calculation
-// elsewhere (ebay-stock-sync) so the number shown here always matches what an actual sale
-// would earn. pctFee/fixedFee are each store's own saved eBay Fees settings (Settings →
-// Profit & fees), never hardcoded, so this stays correct if those are ever changed.
-function netProfitPct(ebayPrice: number, amazonPrice: number, pctFee: number, fixedFee: number): string | null {
+// eBay's cut is subtracted. pctFee/fixedFee are each store's own saved eBay Fees settings
+// (Settings → Profit & fees), never hardcoded, so this stays correct if those are ever changed.
+function netProfitPct(ebayPrice: number, amazonPrice: number, pctFee: number, fixedFee: number): number | null {
   if (!amazonPrice || amazonPrice <= 0) return null
   const netProceeds = ebayPrice - (ebayPrice * (pctFee / 100) + fixedFee)
   const netProfit = netProceeds - amazonPrice
-  const pct = (netProfit / amazonPrice) * 100
-  const sign = pct >= 0 ? '+' : ''
-  return `${sign}${pct.toFixed(0)}%`
+  return (netProfit / amazonPrice) * 100
+}
+
+function formatPct(pct: number): string {
+  const rounded = Math.round(pct)
+  return `${rounded > 0 ? '+' : ''}${rounded}%`
 }
 
 // "6 days ago" / "1 hour ago" style relative time, used for List Date.
@@ -46,13 +61,12 @@ function timeAgo(dateInput: string | number | Date): string {
   return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`
 }
 
-// Same badge style as the shared StatusBadge, except "active" reads as "Synced" —
-// only in this table, so other screens that use StatusBadge are untouched.
-function ListingStatusPill({ status }: { status: ListingStatus }) {
+// Same badge as the shared StatusBadge, with a dot for active listings.
+function ListingStatusPill({ status }: { status: AppListingStatus }) {
   if (status === 'active') {
     return (
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-success-50 text-success-700">
-        <span className="w-1.5 h-1.5 rounded-full bg-success-500" /> Synced
+        <span className="w-1.5 h-1.5 rounded-full bg-success-500" /> Active
       </span>
     )
   }
@@ -219,7 +233,7 @@ function IdPill({
 }
 
 export default function Listings() {
-  const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings, refresh } = useStoreData()
+  const { listings, loading, endListing, removeListingLocal, updateListing, stores, syncAllEbayListings, refresh, fetchAmazonProduct } = useStoreData()
   const activeStore = stores.find(s => s.active) || stores[0]
   const [syncingFromEbay, setSyncingFromEbay] = useState(false)
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
@@ -237,28 +251,42 @@ export default function Listings() {
   // once for every store that appears in the current listings, so the net-profit % shown per
   // row always uses that row's OWN store's real fee settings rather than one hardcoded number.
   const [feeSettingsByStore, setFeeSettingsByStore] = useState<Record<string, { pctFee: number; fixedFee: number }>>({})
+  const [feeLoadError, setFeeLoadError] = useState<string | null>(null)
+  const storeIdsKey = useMemo(
+    () => Array.from(new Set(listings.map(l => l.storeId).filter(Boolean))).sort().join(','),
+    [listings],
+  )
 
   useEffect(() => {
-    const storeIds = Array.from(new Set(listings.map(l => l.storeId).filter(Boolean)))
+    const storeIds = storeIdsKey ? storeIdsKey.split(',') : []
     if (storeIds.length === 0) return
     let cancelled = false
     ;(async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('pricing_settings')
         .select('store_id, ebay_percentage_fee, ebay_fixed_fee')
         .in('store_id', storeIds)
-      if (cancelled || !data) return
+      if (cancelled) return
+      if (error) {
+        setFeeLoadError(error.message)
+        return
+      }
+      setFeeLoadError(null)
       const map: Record<string, { pctFee: number; fixedFee: number }> = {}
-      for (const row of data) {
+      for (const row of (data || []) as Array<{ store_id: string; ebay_percentage_fee: number | string | null; ebay_fixed_fee: number | string | null }>) {
         map[row.store_id] = {
-          pctFee: Number(row.ebay_percentage_fee) || 13.25,
-          fixedFee: Number(row.ebay_fixed_fee) || 0.30,
+          pctFee: numberOr(row.ebay_percentage_fee, DEFAULT_PCT_FEE),
+          fixedFee: numberOr(row.ebay_fixed_fee, DEFAULT_FIXED_FEE),
         }
       }
       setFeeSettingsByStore(map)
     })()
     return () => { cancelled = true }
-  }, [listings])
+  }, [storeIdsKey])
+
+  function feesFor(storeId: string): { pctFee: number; fixedFee: number } {
+    return feeSettingsByStore[storeId] || { pctFee: DEFAULT_PCT_FEE, fixedFee: DEFAULT_FIXED_FEE }
+  }
 
   async function handleSyncFromEbay() {
     if (!activeStore) return
@@ -275,13 +303,14 @@ export default function Listings() {
   }
 
   const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<ListingStatus | 'all'>('all')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   const [selected, setSelected] = useState<string[]>([])
   const [sortField, setSortField] = useState<'title' | 'ebayPrice' | 'soldCount' | 'listedDate'>('listedDate')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [bulkRunning, setBulkRunning] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [menuAnchorRect, setMenuAnchorRect] = useState<DOMRect | null>(null)
   const [bulkMenuOpen, setBulkMenuOpen] = useState(false)
@@ -289,14 +318,21 @@ export default function Listings() {
   const [pageSize, setPageSize] = useState<typeof PAGE_SIZE_OPTIONS[number]>(50)
 
   const filtered = useMemo(() => {
+    const q = search.toLowerCase()
     let result = listings.filter(l => {
-      const matchSearch = l.title.toLowerCase().includes(search.toLowerCase()) || l.asin.toLowerCase().includes(search.toLowerCase())
+      const matchSearch = l.title.toLowerCase().includes(q) || l.asin.toLowerCase().includes(q) || l.skuHint.toLowerCase().includes(q)
       const matchStatus = statusFilter === 'all' || l.status === statusFilter
       return matchSearch && matchStatus
     })
     result = [...result].sort((a, b) => {
-      let av = a[sortField] as string | number
-      let bv = b[sortField] as string | number
+      const av = a[sortField] as string | number
+      const bv = b[sortField] as string | number
+      // Listings without a list date always go last, whichever way the column is sorted.
+      if (sortField === 'listedDate') {
+        if (!av && !bv) return 0
+        if (!av) return 1
+        if (!bv) return -1
+      }
       if (typeof av === 'string' && typeof bv === 'string') {
         return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av)
       }
@@ -309,6 +345,21 @@ export default function Listings() {
     setPage(1)
   }, [search, statusFilter, sortField, sortDir, pageSize])
 
+  // A selection made under one search/filter must not silently carry over to rows that are no
+  // longer visible — clear it whenever the search or status filter changes.
+  useEffect(() => {
+    setSelected([])
+  }, [search, statusFilter])
+
+  // Bulk actions only ever touch selected rows that are visible under the current filter.
+  function selectedVisibleTargets(): AppListing[] {
+    return filtered.filter(l => selected.includes(l.id))
+  }
+
+  function finishBulk(result: BulkResult) {
+    setBulkResult(result)
+    setSelected([])
+  }
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, totalPages)
   const paged = useMemo(
@@ -339,17 +390,18 @@ export default function Listings() {
     }
   }
 
-  async function handleDeleteOne(listing: typeof listings[number], mode: 'ebay' | 'local') {
+  async function handleDeleteOne(listing: AppListing, mode: 'ebay' | 'local') {
     const confirmMsg = mode === 'ebay'
       ? `End "${listing.title}" on eBay and remove it? This cannot be undone.`
-      : `Remove "${listing.title}" from this app only? The listing on eBay (if any) will stay untouched.`
+      : `Stop automation for "${listing.title}"? It stays in this list as "Untracked" and the tracker stops changing its price/stock. The listing on eBay (if any) stays untouched.`
     if (!window.confirm(confirmMsg)) return
 
     setActionError(null)
+    setBulkResult(null)
     setDeletingId(listing.id)
     try {
       if (mode === 'ebay') {
-        await endListing(listing.storeId, listing.id, listing.asin || undefined)
+        await endListing(listing.storeId, listing.id, listingSku(listing) || undefined)
       } else {
         await removeListingLocal(listing.id)
       }
@@ -363,14 +415,15 @@ export default function Listings() {
 
   async function handleBulkEnd(mode: 'ebay' | 'local') {
     setBulkMenuOpen(false)
-    const targets = listings.filter(l => selected.includes(l.id))
+    const targets = selectedVisibleTargets()
     if (targets.length === 0) return
     const confirmMsg = mode === 'ebay'
       ? `End ${targets.length} listing${targets.length === 1 ? '' : 's'} on eBay? This cannot be undone.`
-      : `Remove ${targets.length} listing${targets.length === 1 ? '' : 's'} from this app only? Nothing changes on eBay.`
+      : `Stop automation for ${targets.length} listing${targets.length === 1 ? '' : 's'}? They stay here as "Untracked". Nothing changes on eBay.`
     if (!window.confirm(confirmMsg)) return
 
     setActionError(null)
+    setBulkResult(null)
     setBulkRunning(true)
     const failures: string[] = []
 
@@ -384,7 +437,7 @@ export default function Listings() {
       await Promise.all(chunk.map(async l => {
         try {
           if (mode === 'ebay') {
-            await endListing(l.storeId, l.id, l.asin || undefined, { skipRefresh: true })
+            await endListing(l.storeId, l.id, listingSku(l) || undefined, { skipRefresh: true })
           } else {
             await removeListingLocal(l.id)
           }
@@ -396,65 +449,94 @@ export default function Listings() {
 
     if (mode === 'ebay') await refresh()
     setBulkRunning(false)
-    setSelected([])
-    if (failures.length > 0) setActionError(failures.slice(0, 3).join(' | '))
+    finishBulk({ action: mode === 'ebay' ? 'End on eBay' : 'Remove from automation', total: targets.length, failures, skipped: [] })
   }
 
   async function handleBulkEditQuantity() {
-    const targets = listings.filter(l => selected.includes(l.id))
+    const targets = selectedVisibleTargets()
     if (targets.length === 0) return
     const input = window.prompt(`Set quantity for ${targets.length} listing${targets.length === 1 ? '' : 's'}:`, String(targets[0].quantity))
     if (input === null) return
-    const qty = Math.max(0, Math.floor(Number(input)))
-    if (!Number.isFinite(qty)) return
+    const parsed = Number(input)
+    if (input.trim() === '' || !Number.isFinite(parsed)) return
+    const qty = Math.max(0, Math.floor(parsed))
 
     setActionError(null)
+    setBulkResult(null)
     setBulkRunning(true)
     const failures: string[] = []
-    for (const l of targets) {
-      try {
-        if (l.ebayId) {
-          await updateListing(l.storeId, { sku: l.asin, quantity: qty })
-        } else {
-          const { error } = await supabase.from('listings').update({ quantity: qty }).eq('id', l.id)
-          if (error) throw new Error(error.message)
+    const skipped: string[] = []
+    try {
+      for (const l of targets) {
+        try {
+          if (l.ebayId) {
+            const sku = listingSku(l)
+            if (!sku) { skipped.push(`${l.title}: SKU/ASIN yok`); continue }
+            await updateListing(l.storeId, { sku, quantity: qty, oldQuantity: l.quantity }, { skipRefresh: true, listingId: l.id })
+          } else {
+            const { error } = await supabase.from('listings').update({ quantity: qty }).eq('id', l.id)
+            if (error) throw new Error(error.message)
+          }
+        } catch (err) {
+          failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
         }
-      } catch (err) {
-        failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
       }
+    } finally {
+      await refresh()
+      setBulkRunning(false)
     }
-    setBulkRunning(false)
-    setSelected([])
-    if (failures.length > 0) setActionError(failures.slice(0, 3).join(' | '))
+    finishBulk({ action: 'Edit Quantity', total: targets.length, failures, skipped })
   }
 
   async function handleBulkSetMargin() {
-    const targets = listings.filter(l => selected.includes(l.id))
+    const targets = selectedVisibleTargets()
     if (targets.length === 0) return
-    const input = window.prompt(`Set profit margin % (over Amazon cost) for ${targets.length} listing${targets.length === 1 ? '' : 's'}:`, '20')
+    const input = window.prompt(
+      `Set NET profit margin % (over Amazon cost, after eBay fees) for ${targets.length} listing${targets.length === 1 ? '' : 's'}:`,
+      '20',
+    )
     if (input === null) return
     const marginPct = Number(input)
-    if (!Number.isFinite(marginPct)) return
+    if (input.trim() === '' || !Number.isFinite(marginPct)) return
+    if (feeLoadError) {
+      setActionError(`eBay ücret ayarları yüklenemedi, fiyat hesaplanamıyor: ${feeLoadError}`)
+      return
+    }
 
     setActionError(null)
+    setBulkResult(null)
     setBulkRunning(true)
     const failures: string[] = []
-    for (const l of targets) {
-      try {
-        const newPrice = Math.round(l.amazonPrice * (1 + marginPct / 100) * 100) / 100
-        if (l.ebayId) {
-          await updateListing(l.storeId, { sku: l.asin, price: newPrice })
-        } else {
-          const { error } = await supabase.from('listings').update({ ebay_price: newPrice }).eq('id', l.id)
-          if (error) throw new Error(error.message)
+    const skipped: string[] = []
+    try {
+      for (const l of targets) {
+        if (!l.amazonPrice || l.amazonPrice <= 0) {
+          skipped.push(`${l.title}: Amazon fiyatı yok`)
+          continue
         }
-      } catch (err) {
-        failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
+        try {
+          // Price so that what's left after eBay's % fee and fixed fee is cost × (1 + margin).
+          const { pctFee, fixedFee } = feesFor(l.storeId)
+          if (pctFee >= 100) throw new Error(`invalid eBay fee setting (${pctFee}%)`)
+          const newPrice = Math.round(((l.amazonPrice * (1 + marginPct / 100) + fixedFee) / (1 - pctFee / 100)) * 100) / 100
+          if (!Number.isFinite(newPrice) || newPrice <= 0) throw new Error(`computed price is invalid (${newPrice})`)
+          if (l.ebayId) {
+            const sku = listingSku(l)
+            if (!sku) { skipped.push(`${l.title}: SKU/ASIN yok`); continue }
+            await updateListing(l.storeId, { sku, price: newPrice, oldPrice: l.ebayPrice }, { skipRefresh: true, listingId: l.id })
+          } else {
+            const { error } = await supabase.from('listings').update({ ebay_price: newPrice }).eq('id', l.id)
+            if (error) throw new Error(error.message)
+          }
+        } catch (err) {
+          failures.push(`${l.title}: ${err instanceof Error ? err.message : 'failed'}`)
+        }
       }
+    } finally {
+      await refresh()
+      setBulkRunning(false)
     }
-    setBulkRunning(false)
-    setSelected([])
-    if (failures.length > 0) setActionError(failures.slice(0, 3).join(' | '))
+    finishBulk({ action: `Set Margin ${marginPct}%`, total: targets.length, failures, skipped })
   }
 
   async function handleCopyId(value: string) {
@@ -466,74 +548,93 @@ export default function Listings() {
     }
   }
 
-  async function handleChangeAsin(listing: typeof listings[number]) {
+  async function handleChangeAsin(listing: AppListing) {
     const input = window.prompt('New ASIN for this listing:', listing.asin)
     if (input === null) return
     const newAsin = input.trim().toUpperCase()
     if (!newAsin || newAsin === listing.asin) return
     setActionError(null)
+    setBulkResult(null)
+
+    // The eBay inventory item keeps the SKU it was created with — changing the ASIN here does not
+    // change it. Remember that SKU in sku_hint so later price/quantity updates still reach it.
+    const originalSku = listingSku(listing)
+
     try {
-      // Save the ASIN right away so it's visible immediately.
-      const { error: asinErr } = await supabase.from('listings').update({ asin: newAsin }).eq('id', listing.id)
-      if (asinErr) throw new Error(asinErr.message)
-
-      // Then immediately fetch the real Amazon price and push the recalculated eBay price —
-      // don't wait for the next periodic stock-check sweep (which runs every ~75s but goes
-      // through listings in order, so a freshly-added ASIN could sit for a while looking like
-      // nothing happened). skip_duplicate_check is required here since amazon-fetch's "already
-      // listed" guard would otherwise flag this listing against the ASIN we just gave it.
-      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-      const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
-      const fetchRes = await fetch(`${supabaseUrl}/functions/v1/amazon-fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-        body: JSON.stringify({ asin: newAsin, store_id: listing.storeId, skip_duplicate_check: true }),
-      })
-      const fetchData = await fetchRes.json().catch(() => ({}))
-
-      if (fetchData.success && fetchData.product) {
-        const amazonPrice = Number(fetchData.product.price) || 0
-        if (amazonPrice > 0) {
-          const [settingsRes, tiersRes] = await Promise.all([
-            supabase.from('pricing_settings').select('*').eq('store_id', listing.storeId).maybeSingle(),
-            supabase.from('pricing_rules').select('*').eq('store_id', listing.storeId).order('sort_order', { ascending: true }),
-          ])
-          const pricingEnabled = settingsRes.data?.pricing_enabled ?? true
-          const pctFee = Number(settingsRes.data?.ebay_percentage_fee) || 13.25
-          const fixedFee = Number(settingsRes.data?.ebay_fixed_fee) || 0.30
-          const tiers = (tiersRes.data || []).map(t => ({
-            min: Number(t.min_price) || 0,
-            max: Number(t.max_price) || 999999,
-            profitPct: Number(t.profit_pct) || 0,
-            fixProfit: Number(t.fixed_profit) || 0,
-          }))
-          const calc = calculateEbayPrice(amazonPrice, tiers, pctFee, fixedFee, pricingEnabled)
-          const newEbayPrice = calc.finalPrice
-
-          await supabase.from('listings').update({
-            amazon_price: amazonPrice,
-            ebay_price: newEbayPrice,
-            last_stock_check: new Date().toISOString(),
-          }).eq('id', listing.id)
-
-          // Push the new price live to eBay too, not just our own database.
-          if (listing.ebayId) {
-            await fetch(`${supabaseUrl}/functions/v1/ebay-sync/update-listing`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
-              body: JSON.stringify({ storeId: listing.storeId, route: 'update-listing', sku: newAsin, price: newEbayPrice }),
-            })
-          }
+      // Fetch the new product first (skip_duplicate_check: amazon-fetch's "already listed"
+      // guard would otherwise flag this listing against itself). Filter / VeRO rejections and
+      // scrape errors are shown instead of being silently ignored.
+      let product: AmazonProduct | null = null
+      try {
+        product = await fetchAmazonProduct(newAsin, listing.storeId, { skipDuplicateCheck: true })
+      } catch (fetchErr) {
+        const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr)
+        const saveAnyway = window.confirm(
+          `Amazon ürünü alınamadı (${newAsin}):\n${msg}\n\nASIN yine de kaydedilsin mi? (Fiyat güncellenmez.)`,
+        )
+        if (!saveAnyway) {
+          setActionError(`ASIN değiştirilmedi — Amazon: ${msg}`)
+          return
         }
       }
 
-      await refresh()
+      const amazonPrice = product ? Number(product.price) || 0 : 0
+      const dbPatch: { asin: string; sku_hint?: string; amazon_price?: number } = { asin: newAsin }
+      if (!listing.skuHint && originalSku) dbPatch.sku_hint = originalSku
+      if (amazonPrice > 0) dbPatch.amazon_price = amazonPrice
+      const { error: asinErr } = await supabase.from('listings').update(dbPatch).eq('id', listing.id)
+      if (asinErr) throw new Error(`ASIN kaydedilemedi: ${asinErr.message}`)
+
+      if (product && amazonPrice <= 0) {
+        setActionError(`ASIN kaydedildi, ancak Amazon fiyatı okunamadı — eBay fiyatı değiştirilmedi.`)
+      }
+
+      if (amazonPrice > 0) {
+        const [settingsRes, tiersRes] = await Promise.all([
+          supabase.from('pricing_settings').select('pricing_enabled, ebay_percentage_fee, ebay_fixed_fee').eq('store_id', listing.storeId).maybeSingle(),
+          supabase.from('pricing_rules').select('min_price, max_price, profit_pct, fixed_profit').eq('store_id', listing.storeId).order('sort_order', { ascending: true }),
+        ])
+        if (settingsRes.error) throw new Error(`ASIN kaydedildi, ancak fiyat ayarları yüklenemedi: ${settingsRes.error.message}`)
+        if (tiersRes.error) throw new Error(`ASIN kaydedildi, ancak fiyat kuralları yüklenemedi: ${tiersRes.error.message}`)
+        const settings = (settingsRes.data || null) as { pricing_enabled?: boolean | null; ebay_percentage_fee?: number | string | null; ebay_fixed_fee?: number | string | null } | null
+        const pricingEnabled = settings?.pricing_enabled ?? true
+        const pctFee = numberOr(settings?.ebay_percentage_fee, DEFAULT_PCT_FEE)
+        const fixedFee = numberOr(settings?.ebay_fixed_fee, DEFAULT_FIXED_FEE)
+        const tierRows = (tiersRes.data || []) as Array<{ min_price: number | string | null; max_price: number | string | null; profit_pct: number | string | null; fixed_profit: number | string | null }>
+        const tiers = tierRows.map(t => ({
+          min: numberOr(t.min_price, 0),
+          max: numberOr(t.max_price, 999999),
+          profitPct: numberOr(t.profit_pct, 0),
+          fixProfit: numberOr(t.fixed_profit, 0),
+        }))
+        const newEbayPrice = calculateEbayPrice(amazonPrice, tiers, pctFee, fixedFee, pricingEnabled).finalPrice
+
+        if (listing.ebayId) {
+          if (!originalSku) throw new Error('ASIN kaydedildi, ancak bu ilanın eBay SKU\'su bilinmiyor — eBay fiyatı güncellenemedi.')
+          // Push the new price live to eBay using the item's ORIGINAL SKU; on success
+          // updateListing also writes ebay_price to our listings row.
+          try {
+            await updateListing(
+              listing.storeId,
+              { sku: originalSku, price: newEbayPrice, oldPrice: listing.ebayPrice, reason: `Tubika — ASIN değişti (${listing.asin || '—'} → ${newAsin})` },
+              { skipRefresh: true, listingId: listing.id },
+            )
+          } catch (updErr) {
+            throw new Error(`ASIN kaydedildi, ancak eBay fiyatı güncellenemedi: ${updErr instanceof Error ? updErr.message : String(updErr)}`)
+          }
+        } else {
+          const { error: priceErr } = await supabase.from('listings').update({ ebay_price: newEbayPrice }).eq('id', listing.id)
+          if (priceErr) throw new Error(`ASIN kaydedildi, ancak fiyat kaydedilemedi: ${priceErr.message}`)
+        }
+      }
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed to update ASIN')
+    } finally {
+      await refresh()
     }
   }
 
-  async function handleChangeEbayId(listing: typeof listings[number]) {
+  async function handleChangeEbayId(listing: AppListing) {
     const input = window.prompt(
       'New eBay Item ID for this listing:\n\nNote: this only corrects the ID stored here — it does not move or recreate anything on eBay itself.',
       listing.ebayId,
@@ -551,13 +652,15 @@ export default function Listings() {
     }
   }
 
-  const statusOptions: { value: ListingStatus | 'all'; label: string }[] = [
+  const statusOptions: { value: StatusFilter; label: string }[] = [
     { value: 'all', label: 'All' },
     { value: 'active', label: 'Active' },
     { value: 'draft', label: 'Drafts' },
     { value: 'ended', label: 'Ended' },
     { value: 'out_of_stock', label: 'Out of Stock' },
     { value: 'unknown', label: 'Unknown' },
+    { value: 'untracked', label: 'Untracked' },
+    { value: 'delisted_cold', label: 'Delisted (cold)' },
   ]
 
   if (loading) {
@@ -581,7 +684,7 @@ export default function Listings() {
           <Filter className="w-4 h-4 text-slate-400" />
           <select
             value={statusFilter}
-            onChange={e => setStatusFilter(e.target.value as ListingStatus | 'all')}
+            onChange={e => setStatusFilter(e.target.value as StatusFilter)}
             className="input w-auto"
           >
             {statusOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -642,7 +745,7 @@ export default function Listings() {
                   className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 flex flex-col"
                 >
                   <span className="font-medium">Remove from automation only</span>
-                  <span className="text-xs text-slate-400">Stops tracking here — eBay is untouched. Use if your eBay connection is broken.</span>
+                  <span className="text-xs text-slate-400">Marks it "Untracked" — the tracker stops changing it. eBay is untouched.</span>
                 </button>
               </div>
             )}
@@ -655,6 +758,51 @@ export default function Listings() {
         <div className="flex items-start gap-2 text-sm text-error-600 bg-error-50 rounded-lg px-4 py-2">
           <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{actionError}</span>
+        </div>
+      )}
+
+      {feeLoadError && (
+        <div role="alert" className="flex items-start gap-2 text-sm text-error-700 bg-error-50 border border-error-200 rounded-lg px-4 py-2">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>eBay ücret ayarları yüklenemedi — kâr % değerleri varsayılan ücretlerle ({DEFAULT_PCT_FEE}% + {formatCurrency(DEFAULT_FIXED_FEE)}) gösteriliyor: {feeLoadError}</span>
+        </div>
+      )}
+
+      {bulkResult && (
+        <div
+          role={bulkResult.failures.length > 0 ? 'alert' : 'status'}
+          className={cn(
+            'text-sm rounded-lg px-4 py-2 border',
+            bulkResult.failures.length > 0 ? 'text-error-700 bg-error-50 border-error-200' : 'text-success-700 bg-success-50 border-success-200',
+          )}
+        >
+          <div className="flex items-start gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span className="flex-1">
+              <span className="font-medium">{bulkResult.action}:</span>{' '}
+              {bulkResult.failures.length > 0
+                ? `${bulkResult.failures.length} / ${bulkResult.total} başarısız`
+                : `${bulkResult.total - bulkResult.skipped.length} / ${bulkResult.total} başarılı`}
+              {bulkResult.skipped.length > 0 && ` · ${bulkResult.skipped.length} atlandı`}
+            </span>
+            <button type="button" className="text-xs underline hover:no-underline shrink-0" onClick={() => setBulkResult(null)}>Kapat</button>
+          </div>
+          {bulkResult.failures.length > 0 && (
+            <details className="mt-1 ml-6">
+              <summary className="cursor-pointer text-xs">Başarısız olanların tam listesi ({bulkResult.failures.length})</summary>
+              <ul className="mt-1 list-disc pl-5 text-xs space-y-0.5 max-h-64 overflow-y-auto">
+                {bulkResult.failures.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </details>
+          )}
+          {bulkResult.skipped.length > 0 && (
+            <details className="mt-1 ml-6">
+              <summary className="cursor-pointer text-xs">Atlananlar ({bulkResult.skipped.length})</summary>
+              <ul className="mt-1 list-disc pl-5 text-xs space-y-0.5 max-h-64 overflow-y-auto">
+                {bulkResult.skipped.map((f, i) => <li key={i}>{f}</li>)}
+              </ul>
+            </details>
+          )}
         </div>
       )}
 
@@ -703,7 +851,7 @@ export default function Listings() {
               </thead>
               <tbody>
                 {paged.map(listing => {
-                  const fees = feeSettingsByStore[listing.storeId] || { pctFee: 13.25, fixedFee: 0.30 }
+                  const fees = feesFor(listing.storeId)
                   const pct = netProfitPct(listing.ebayPrice, listing.amazonPrice, fees.pctFee, fees.fixedFee)
                   return (
                   <tr key={listing.id} className="border-b border-slate-100 table-row-hover">
@@ -743,18 +891,27 @@ export default function Listings() {
                     <td className="px-2.5 py-2 text-right">
                       <div className="font-medium text-slate-900">
                         {formatCurrency(listing.ebayPrice)}
-                        {pct && <span className="ml-1 text-xs font-medium text-success-600" title="Net profit % after eBay fees">({pct})</span>}
+                        {pct !== null && (
+                          <span
+                            className={cn('ml-1 text-xs font-medium', pct > 0 ? 'text-success-600' : pct < 0 ? 'text-error-600' : 'text-slate-500')}
+                            title="Net profit % after eBay fees"
+                          >
+                            ({formatPct(pct)})
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-2.5 py-2 text-right text-slate-700">{listing.quantity}</td>
                     <td className="px-2.5 py-2 text-right text-slate-700">{listing.soldCount}</td>
                     <td className="px-2.5 py-2"><ListingStatusPill status={listing.status} /></td>
-                    <td className="px-2.5 py-2 text-slate-500 text-xs">{timeAgo(listing.listedDate)}</td>
+                    <td className="px-2.5 py-2 text-slate-500 text-xs">{listing.listedDate ? timeAgo(listing.listedDate) : <span className="text-slate-400">—</span>}</td>
                     <td className="px-2.5 py-2 text-slate-500 text-xs">
                       {listing.lastSaleDate ? timeAgo(listing.lastSaleDate) : <span className="text-slate-400">Never</span>}
                     </td>
                     <td className="px-2.5 py-2 text-slate-500 text-xs">
-                      {listing.checkedDate ? timeAgo(listing.checkedDate) : <span className="text-slate-400">Not yet</span>}
+                      {listing.checkedDate
+                        ? <span title="Last Amazon price/stock check by the server tracker (every listing roughly every 12 hours)">{timeAgo(listing.checkedDate)}</span>
+                        : <span className="text-slate-400" title="The server tracker checks every listing roughly every 12 hours">Not yet</span>}
                     </td>
                     <td className="px-2.5 py-2">
                       <div className="flex items-center justify-end gap-1">
@@ -822,7 +979,7 @@ export default function Listings() {
               },
               {
                 label: 'Remove from automation only',
-                description: "Stops tracking here — eBay is untouched. Use if your eBay connection is broken.",
+                description: 'Marks it "Untracked" — the tracker stops changing its price/stock. eBay is untouched.',
                 onClick: () => void handleDeleteOne(listing, 'local'),
                 icon: Unlink2,
               },

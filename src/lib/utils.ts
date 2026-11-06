@@ -1,3 +1,4 @@
+import { authHeaders } from './supabase'
 export function formatCurrency(n: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n)
 }
@@ -18,6 +19,27 @@ export function timeAgo(iso: string): string {
   if (hrs < 24) return `${hrs}h ago`
   const days = Math.floor(hrs / 24)
   return `${days}d ago`
+}
+
+// Number from a DB/settings value, falling back ONLY when the value is missing (null/undefined/
+// empty) or not a number — unlike `Number(v) || def`, a real saved 0 stays 0.
+export function numberOr(value: unknown, fallback: number): number {
+  if (value === null || value === undefined || value === '') return fallback
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+// Escapes text for safe insertion into HTML (element content and quoted attributes). Braces are
+// encoded too so scraped text containing "{{...}}" can't be picked up as a template tag.
+export function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/{/g, '&#123;')
+    .replace(/}/g, '&#125;')
 }
 
 export function cn(...classes: (string | false | undefined | null)[]): string {
@@ -82,7 +104,6 @@ export function stripHtml(html: string): string {
 export async function proxyImageUrls(urls: string[]): Promise<string[]> {
   if (!urls.length) return []
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string
   if (!supabaseUrl) return urls
 
   try {
@@ -91,7 +112,7 @@ export async function proxyImageUrls(urls: string[]): Promise<string[]> {
     // exact route or every call 404s.
     const res = await fetch(`${supabaseUrl}/functions/v1/smart-worker`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey}` },
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()), },
       body: JSON.stringify({ urls }),
     })
     const data = await res.json().catch(() => ({})) as { success?: boolean; ids?: (string | null)[] }
@@ -243,11 +264,12 @@ export function buildTemplateDescription(product: {
   description?: string
   images?: string[]
 }): string {
-  const title = stripHtml(product?.title || '')
-  const bullets = (product?.bulletPoints || []).map(b => stripHtml(String(b))).filter(Boolean)
-  const description = stripHtml(product?.description || '').trim()
-  // Images arrive here already proxied (see fetchAmazonProduct in useData.ts) — use as-is.
-  const images = (product?.images || []).filter(Boolean)
+  // stripHtml returns decoded text (so "&lt;b&gt;" becomes "<b>") — escape again before inserting.
+  const title = escapeHtml(stripHtml(product?.title || ''))
+  const bullets = (product?.bulletPoints || []).map(b => stripHtml(String(b))).filter(Boolean).map(escapeHtml)
+  const description = escapeHtml(stripHtml(product?.description || '').trim())
+  // Images arrive here already proxied (see fetchAmazonProduct in useData.ts).
+  const images = (product?.images || []).filter(Boolean).map(escapeHtml)
   const mainImage = images[0] || ''
   const galleryImages = images.slice(1, 5)
 
@@ -361,6 +383,9 @@ export function buildTemplateDescription(product: {
 // either loops (if data[key] is an array, with {{.}} referring to the current item) or
 // shows the block once (if data[key] is a truthy string, with {{.}} referring to that
 // string) — and is omitted entirely if data[key] is empty/falsy.
+// Every inserted VALUE is HTML-escaped (titles, bullets, descriptions, brand, specs and URLs all
+// come from scraped Amazon pages and are shown via dangerouslySetInnerHTML / sent to eBay);
+// only the template's own markup is emitted as HTML.
 export function renderListingTemplate(template: string, data: Record<string, unknown>): string {
   let out = template.replace(/{{#(\w+)}}([\s\S]*?){{\/\1}}/g, (_match, key: string, inner: string) => {
     const value = data[key]
@@ -375,7 +400,7 @@ export function renderListingTemplate(template: string, data: Record<string, unk
   out = out.replace(/{{\s*([.\w]+)\s*}}/g, (_match, key: string) => {
     const value = data[key]
     if (value === undefined || value === null || Array.isArray(value)) return ''
-    return String(value)
+    return escapeHtml(value)
   })
   return out
 }

@@ -2,23 +2,21 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useState } from 'react'
 import {
   ArrowLeft, Save, Trash2,
-  Plus, X, ExternalLink, Sparkles, Loader2, AlertCircle,
+  Plus, ExternalLink, Sparkles, Loader2, AlertCircle,
 } from 'lucide-react'
 import { useStoreData } from '../lib/DataContext'
 import { EmptyState } from '../components/UI'
-import { formatCurrency } from '../lib/utils'
+import { formatCurrency, numberOr, cn } from '../lib/utils'
+import { supabase } from '../lib/supabase'
+import { listingSku, type UpdateListingPayload } from '../lib/useData'
+
+const COMING_SOON = 'Yakında'
 
 export default function EditListing() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { stores, listings: liveListings, updateListing, endListing } = useStoreData()
   const listing = liveListings.find(l => l.id === id)
-  const [specs, setSpecs] = useState([
-    { name: 'Brand', value: '' },
-    { name: 'MPN', value: '' },
-    { name: 'UPC', value: '' },
-    { name: 'Color', value: '' },
-  ])
   const [title, setTitle] = useState(listing?.title || '')
   const [price, setPrice] = useState(listing ? String(listing.ebayPrice) : '')
   const [quantity, setQuantity] = useState(listing ? String(listing.quantity) : '')
@@ -28,8 +26,36 @@ export default function EditListing() {
   const [ending, setEnding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
+  // This store's own eBay fee settings (Settings → Profit & fees); null until loaded.
+  const [fees, setFees] = useState<{ pctFee: number; fixedFee: number } | null>(null)
+  const [feeError, setFeeError] = useState<string | null>(null)
 
   const activeStore = stores.find(s => s.active) || stores[0]
+  const listingStoreId = listing?.storeId || activeStore?.id || ''
+
+  useEffect(() => {
+    if (!listingStoreId) return
+    let cancelled = false
+    ;(async () => {
+      const { data, error: feeErr } = await supabase
+        .from('pricing_settings')
+        .select('ebay_percentage_fee, ebay_fixed_fee')
+        .eq('store_id', listingStoreId)
+        .maybeSingle()
+      if (cancelled) return
+      if (feeErr) {
+        setFeeError(feeErr.message)
+        return
+      }
+      const row = (data || null) as { ebay_percentage_fee?: number | string | null; ebay_fixed_fee?: number | string | null } | null
+      setFeeError(null)
+      setFees({
+        pctFee: numberOr(row?.ebay_percentage_fee, 13.25),
+        fixedFee: numberOr(row?.ebay_fixed_fee, 0.30),
+      })
+    })()
+    return () => { cancelled = true }
+  }, [listingStoreId])
 
   // FIX: listings are loaded asynchronously. When this page is opened directly (or the data
   // arrives a moment after the page renders), the fields above were initialised while
@@ -66,7 +92,7 @@ export default function EditListing() {
     if (!window.confirm('End this listing? It will be removed from eBay and your store.')) return
     setEnding(true); setError(null)
     try {
-      await endListing(activeStore?.id || '', listing.id, listing.asin || listing.ebayId)
+      await endListing(listing.storeId || activeStore?.id || '', listing.id, listingSku(listing) || undefined)
       navigate('/listings')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to end listing')
@@ -76,7 +102,8 @@ export default function EditListing() {
   }
 
   const handleSave = async () => {
-    if (!activeStore) { setError('No connected store found.'); return }
+    const storeId = listing.storeId || activeStore?.id
+    if (!storeId) { setError('No connected store found.'); return }
     if (loadedId !== listing.id) { setError('Listing details are still loading — please wait a moment and try again.'); return }
 
     // FIX: only send what actually changed, and never send an empty/invalid value.
@@ -91,22 +118,26 @@ export default function EditListing() {
     if (!Number.isFinite(newPrice) || newPrice <= 0) { setError('Enter a valid eBay price greater than 0.'); return }
     if (!Number.isInteger(newQuantity) || newQuantity < 0) { setError('Enter a valid quantity (0 or more).'); return }
 
-    const changes: { sku: string; title?: string; price?: number; quantity?: number; description?: string } = {
-      sku: listing.asin || listing.ebayId,
-    }
-    if (trimmedTitle !== (listing.title || '').trim()) changes.title = trimmedTitle
-    if (Math.abs(newPrice - Number(listing.ebayPrice)) > 0.001) changes.price = newPrice
-    if (newQuantity !== Number(listing.quantity)) changes.quantity = newQuantity
-    if (description.trim()) changes.description = description
+    // The eBay inventory SKU (sku_hint, else ASIN). The eBay item ID is NOT a SKU, so there is
+    // no fallback to it — sending it would update nothing or the wrong item.
+    const sku = listingSku(listing)
+    if (!sku) { setError('Bu ilanın SKU bilgisi yok (ASIN veya eBay SKU) — eBay güncellenemez. Önce ASIN ekleyin.'); return }
 
-    if (Object.keys(changes).length === 1) {
+    const changes: UpdateListingPayload = { sku }
+    let changed = false
+    if (trimmedTitle !== (listing.title || '').trim()) { changes.title = trimmedTitle; changed = true }
+    if (Math.abs(newPrice - Number(listing.ebayPrice)) > 0.001) { changes.price = newPrice; changes.oldPrice = listing.ebayPrice; changed = true }
+    if (newQuantity !== Number(listing.quantity)) { changes.quantity = newQuantity; changes.oldQuantity = listing.quantity; changed = true }
+    if (description.trim()) { changes.description = description; changed = true }
+
+    if (!changed) {
       setError('Nothing changed — there is nothing to push to eBay.')
       return
     }
 
     setSaving(true); setError(null); setSuccess(false)
     try {
-      await updateListing(activeStore.id, changes)
+      await updateListing(storeId, changes, { listingId: listing.id })
       setSuccess(true)
       setTimeout(() => navigate(-1), 1200)
     } catch (err) {
@@ -160,8 +191,13 @@ export default function EditListing() {
         <div className="card-body">
           <div className="flex items-center justify-between mb-1.5">
             <label className="label mb-0">Listing Title</label>
-            <button className="text-xs text-brand-600 hover:text-brand-700 font-medium flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5" /> Generate AI Title
+            <button
+              type="button"
+              disabled
+              title={COMING_SOON}
+              className="text-xs text-slate-400 font-medium flex items-center gap-1 cursor-not-allowed"
+            >
+              <Sparkles className="w-3.5 h-3.5" /> Generate AI Title ({COMING_SOON.toLowerCase()})
             </button>
           </div>
           <input className="input" value={title} onChange={e => setTitle(e.target.value)} />
@@ -192,9 +228,21 @@ export default function EditListing() {
             <input className="input" type="number" value={quantity} onChange={e => setQuantity(e.target.value)} />
           </div>
           <div className="md:col-span-3 p-3 bg-slate-50 rounded-lg text-sm">
-            <span className="text-slate-500">Estimated profit per sale: </span>
-            <span className="font-semibold text-success-600">{formatCurrency(listing.ebayPrice - listing.amazonPrice - listing.ebayPrice * 0.13)}</span>
-            <span className="text-slate-400"> (after 13% eBay fees)</span>
+            {(() => {
+              if (feeError) return <span className="text-error-600">eBay ücret ayarları yüklenemedi: {feeError}</span>
+              if (!fees) return <span className="text-slate-400">Loading fee settings…</span>
+              if (!listing.amazonPrice || listing.amazonPrice <= 0) return <span className="text-slate-400">No Amazon price yet — profit can't be estimated.</span>
+              const typedPrice = parseFloat(price)
+              const salePrice = Number.isFinite(typedPrice) && typedPrice > 0 ? typedPrice : listing.ebayPrice
+              const profit = salePrice - listing.amazonPrice - (salePrice * (fees.pctFee / 100) + fees.fixedFee)
+              return (
+                <>
+                  <span className="text-slate-500">Estimated profit per sale: </span>
+                  <span className={cn('font-semibold', profit >= 0 ? 'text-success-600' : 'text-error-600')}>{formatCurrency(profit)}</span>
+                  <span className="text-slate-400"> (after {fees.pctFee}% + {formatCurrency(fees.fixedFee)} eBay fees)</span>
+                </>
+              )
+            })()}
           </div>
         </div>
       </div>
@@ -239,35 +287,16 @@ export default function EditListing() {
                 <img src={listing.image} alt="" className="w-full aspect-square rounded-lg object-cover border border-slate-200" />
               </div>
             )}
-            <button className="aspect-square rounded-lg border-2 border-dashed border-slate-300 flex flex-col items-center justify-center text-slate-400 hover:border-brand-400 hover:text-brand-500 transition">
+            <button
+              type="button"
+              disabled
+              title={COMING_SOON}
+              className="aspect-square rounded-lg border-2 border-dashed border-slate-200 flex flex-col items-center justify-center text-slate-300 cursor-not-allowed"
+            >
               <Plus className="w-6 h-6" />
-              <span className="text-xs mt-1">Add Image</span>
+              <span className="text-xs mt-1">Add Image ({COMING_SOON.toLowerCase()})</span>
             </button>
           </div>
-        </div>
-      </div>
-
-      {/* Item specifics */}
-      <div className="card">
-        <div className="card-header">
-          <h3 className="font-semibold text-slate-900">Item specifics</h3>
-          <p className="text-xs text-slate-500 mt-0.5">Includes Brand/MPN/UPC/EAN if eBay has them for this listing — they're just specifics with those names, not a separate thing.</p>
-        </div>
-        <div className="card-body space-y-3">
-          {specs.map((spec, i) => (
-            <div key={i} className="grid grid-cols-2 gap-3">
-              <input className="input" defaultValue={spec.name} placeholder="Name" />
-              <div className="flex gap-2">
-                <input className="input" defaultValue={spec.value} placeholder="Value" />
-                <button onClick={() => setSpecs(specs.filter((_, idx) => idx !== i))} className="btn-ghost text-error-600 hover:bg-error-50">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          ))}
-          <button onClick={() => setSpecs([...specs, { name: '', value: '' }])} className="btn-secondary text-sm">
-            <Plus className="w-4 h-4" /> Add Specific
-          </button>
         </div>
       </div>
 

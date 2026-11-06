@@ -1,3 +1,4 @@
+import { authHeaders } from '../lib/supabase'
 import { useState, useEffect } from 'react'
 import { X, Store, Loader2, CheckCircle2, AlertCircle, ExternalLink } from 'lucide-react'
 import { useStoreData } from '../lib/DataContext'
@@ -9,10 +10,12 @@ export function ConnectStoreModal({ open, onClose, onConnected }: {
 }) {
   const { oauthProcessing, oauthError } = useStoreData()
   const [step, setStep] = useState<'name' | 'connecting' | 'done' | 'error'>('name')
+  const [startError, setStartError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) {
       setStep('name')
+      setStartError(null)
     }
   }, [open])
 
@@ -27,19 +30,20 @@ export function ConnectStoreModal({ open, onClose, onConnected }: {
 
   async function startOAuth() {
     setStep('connecting')
+    setStartError(null)
     sessionStorage.setItem('ebay_store_nickname', 'My Store')
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
     try {
       const res = await fetch(`${supabaseUrl}/functions/v1/ebay-oauth/auth-url`, {
-        headers: { Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` },
+        headers: { ...(await authHeaders()), },
       })
       const data = await res.json() as { authUrl?: string; error?: string; clientId?: string; envClientId?: string }
-      console.log('ebay-oauth response:', data)
       if (!res.ok || typeof data.authUrl !== 'string') {
         throw new Error(data.error || 'Failed to get eBay authorization URL')
       }
       window.location.href = data.authUrl
     } catch (err) {
+      setStartError(err instanceof Error ? err.message : null)
       setStep('error')
     }
   }
@@ -89,7 +93,7 @@ export function ConnectStoreModal({ open, onClose, onConnected }: {
             <div className="flex flex-col items-center py-4 text-center">
               <AlertCircle className="w-12 h-12 text-error-500 mb-3" />
               <p className="text-sm font-medium text-slate-900">Connection failed</p>
-              <p className="text-xs text-slate-500 mt-1">{oauthError || 'Something went wrong. Please try again.'}</p>
+              <p className="text-xs text-slate-500 mt-1">{oauthError || startError || 'Something went wrong. Please try again.'}</p>
               <button onClick={() => setStep('name')} className="btn-secondary mt-4">
                 Try Again
               </button>
