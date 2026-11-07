@@ -635,6 +635,12 @@ export default function ListItems() {
   const [singleStoreId, setSingleStoreId] = useState('')
   const singleStore = stores.find(s => s.id === singleStoreId) || activeStore
 
+  // The store switcher at the top decides the store: when it changes, every tab follows it.
+  useEffect(() => {
+    setSingleStoreId('')
+    setBulkStoreId('')
+  }, [activeStore?.id])
+
   useEffect(() => {
     if (!singleStore?.id) return
     const storeId = singleStore.id
@@ -2124,9 +2130,11 @@ function ImportPanel() {
 
   const store = stores.find(s => s.id === storeId) || null
 
+  // Starts on the store chosen in the store switcher, and follows it when it changes.
+  const activeStoreId = (stores.find(s => s.active) || stores[0])?.id || ''
   useEffect(() => {
-    if (!storeId && stores.length === 1) setStoreId(stores[0].id)
-  }, [stores, storeId])
+    if (activeStoreId) setStoreId(activeStoreId)
+  }, [activeStoreId])
 
   // Closing the tab mid-way would leave only part of the file linked — warn first.
   useEffect(() => {

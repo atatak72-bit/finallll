@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { Search, Bell, HelpCircle, Package, MessageSquare, AlertTriangle, RefreshCw } from 'lucide-react'
 import { useStoreData } from '../lib/DataContext'
 import { SignOutButton } from './AuthGate'
+import StoreSwitcher from './StoreSwitcher'
+
+// Pages whose content belongs to one store show the store switcher next to the title.
+const STORE_PAGES = ['/listings', '/orders', '/list-items']
 
 // ---- Notifications ----
 // Built only from data the app already loads (orders, conversations, revisions, bulk runs),
@@ -98,6 +102,8 @@ const HELP_LINKS: Array<{ label: string; desc: string; to: string }> = [
 
 export default function Topbar({ title, subtitle }: { title: string; subtitle?: string }) {
   const { orders, conversations, revisions, bulkRuns } = useStoreData()
+  const location = useLocation()
+  const showStore = STORE_PAGES.some(p => location.pathname === p || location.pathname.startsWith(p + '/'))
   const [bellOpen, setBellOpen] = useState(false)
   const [helpOpen, setHelpOpen] = useState(false)
   const [seenAt, setSeenAt] = useState<number>(() => readSeenAt())
@@ -197,6 +203,8 @@ export default function Topbar({ title, subtitle }: { title: string; subtitle?: 
         <h1 className="text-lg font-semibold text-slate-900 truncate">{title}</h1>
         {subtitle && <p className="text-sm text-slate-500 truncate">{subtitle}</p>}
       </div>
+
+      {showStore && <StoreSwitcher />}
 
       <div className="relative hidden md:block">
         <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
