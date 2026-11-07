@@ -320,6 +320,8 @@ export default function Listings() {
   const filtered = useMemo(() => {
     const q = search.toLowerCase()
     let result = listings.filter(l => {
+      // Only the store chosen in the store switcher.
+      if (activeStore && l.storeId !== activeStore.id) return false
       const matchSearch = l.title.toLowerCase().includes(q) || l.asin.toLowerCase().includes(q) || l.skuHint.toLowerCase().includes(q)
       const matchStatus = statusFilter === 'all' || l.status === statusFilter
       return matchSearch && matchStatus
@@ -339,17 +341,17 @@ export default function Listings() {
       return sortDir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number)
     })
     return result
-  }, [listings, search, statusFilter, sortField, sortDir])
+  }, [listings, search, statusFilter, sortField, sortDir, activeStore?.id])
 
   useEffect(() => {
     setPage(1)
-  }, [search, statusFilter, sortField, sortDir, pageSize])
+  }, [search, statusFilter, sortField, sortDir, pageSize, activeStore?.id])
 
   // A selection made under one search/filter must not silently carry over to rows that are no
   // longer visible — clear it whenever the search or status filter changes.
   useEffect(() => {
     setSelected([])
-  }, [search, statusFilter])
+  }, [search, statusFilter, activeStore?.id])
 
   // Bulk actions only ever touch selected rows that are visible under the current filter.
   function selectedVisibleTargets(): AppListing[] {
@@ -940,7 +942,7 @@ export default function Listings() {
         )}
         <div className="px-4 py-3 border-t border-slate-200 text-xs text-slate-500 flex items-center justify-between flex-wrap gap-2">
           <span>
-            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length} listings
+            Showing {filtered.length === 0 ? 0 : (currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length} listings{activeStore ? ` · ${activeStore.nickname}` : ''}
           </span>
           <div className="flex items-center gap-2">
             <button

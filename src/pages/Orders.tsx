@@ -23,7 +23,8 @@ function NotesCell({ orderId, initialNotes, onSave }: { orderId: string; initial
 }
 
 export default function Orders() {
-  const { orders, loading, updateOrderNotes, refresh } = useStoreData()
+  const { orders, loading, updateOrderNotes, refresh, stores } = useStoreData()
+  const activeStore = stores.find(s => s.active && s.connected) || stores.find(s => s.connected) || stores[0]
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
 
@@ -36,6 +37,7 @@ export default function Orders() {
 
   const filtered = useMemo(() => {
     return orders.filter(o => {
+      if (activeStore && o.storeId !== activeStore.id) return false
       const matchSearch =
         o.orderId.toLowerCase().includes(search.toLowerCase()) ||
         o.buyerName.toLowerCase().includes(search.toLowerCase()) ||
@@ -43,10 +45,10 @@ export default function Orders() {
       const matchStatus = statusFilter === 'all' || o.status === statusFilter
       return matchSearch && matchStatus
     }).sort((a, b) => new Date(b.orderDate).getTime() - new Date(a.orderDate).getTime())
-  }, [orders, search, statusFilter])
+  }, [orders, search, statusFilter, activeStore?.id])
 
   const totalProfit = filtered.reduce((s, o) => s + o.profit, 0)
-  const pendingCount = orders.filter(o => o.status === 'pending').length
+  const pendingCount = orders.filter(o => (!activeStore || o.storeId === activeStore.id) && o.status === 'pending').length
 
   async function handleSaveNotes(orderId: string, notes: string) {
     try {
