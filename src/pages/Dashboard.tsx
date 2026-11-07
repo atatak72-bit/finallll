@@ -11,7 +11,9 @@ import { useStoreData } from '../lib/DataContext'
 import { formatCurrency, formatDate } from '../lib/utils'
 
 export default function Dashboard() {
-  const { stores, listings, orders, loading, connected, oauthProcessing, oauthError, refresh } = useStoreData()
+  const { stores, listings, orders, loading, connected, oauthProcessing, oauthError, refresh, setActiveStore } = useStoreData()
+  const [switchingId, setSwitchingId] = useState<string | null>(null)
+  const [switchError, setSwitchError] = useState<string | null>(null)
   const [connectOpen, setConnectOpen] = useState(false)
   const [trendMetric, setTrendMetric] = useState<'profit' | 'revenue' | 'orders'>('profit')
 
@@ -116,9 +118,30 @@ export default function Dashboard() {
                   </div>
                   <p className="text-xs text-slate-500 truncate">{store.ebayUsername}</p>
                 </div>
-                <span className="badge-success shrink-0"><CheckCircle2 className="w-3 h-3" /> Connected</span>
+                {store.active ? (
+                  <span className="badge-success shrink-0"><CheckCircle2 className="w-3 h-3" /> Connected</span>
+                ) : (
+                  <button
+                    className="btn-secondary text-xs shrink-0"
+                    disabled={switchingId !== null}
+                    onClick={async () => {
+                      setSwitchingId(store.id)
+                      setSwitchError(null)
+                      try {
+                        await setActiveStore(store.id)
+                      } catch (err) {
+                        setSwitchError(err instanceof Error ? err.message : 'Mağaza değiştirilemedi')
+                      } finally {
+                        setSwitchingId(null)
+                      }
+                    }}
+                  >
+                    {switchingId === store.id ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Switch'}
+                  </button>
+                )}
               </div>
             ))}
+            {switchError && <p className="text-xs text-red-600">{switchError}</p>}
           </div>
         </div>
       </div>

@@ -225,6 +225,8 @@ export interface DataContextValue {
   removeListingLocal: (listingId: string) => Promise<void>
   syncAllEbayListings: (storeId: string) => Promise<{ synced: number; failed: number; totalFound: number }>
   updateOrderNotes: (orderId: string, notes: string) => Promise<void>
+  // Makes this store the active one (ebay_tokens.active) for every page, then reloads the data.
+  setActiveStore: (storeId: string) => Promise<void>
 }
 
 function mapTokenToStore(t: EbayTokenRow): Store {
@@ -1293,5 +1295,26 @@ export function useData(): DataContextValue {
     refresh()
   }, [refresh])
 
-  return { stores, listings, orders, conversations, revisions, loading, loadError, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings, updateOrderNotes }
+  const setActiveStore = useCallback(async (storeId: string) => {
+    if (!storeId) return
+    const { data: onRows, error: onErr } = await supabase
+      .from('ebay_tokens')
+      .update({ active: true })
+      .eq('id', storeId)
+      .select('id')
+    if (onErr) throw new Error(onErr.message)
+    if (!onRows || onRows.length === 0) throw new Error('Mağaza değiştirilemedi (izin yok).')
+    const otherIds = stores.filter(s => s.id !== storeId).map(s => s.id)
+    if (otherIds.length > 0) {
+      const { error: offErr } = await supabase
+        .from('ebay_tokens')
+        .update({ active: false })
+        .in('id', otherIds)
+        .select('id')
+      if (offErr) throw new Error(offErr.message)
+    }
+    await refresh()
+  }, [stores, refresh])
+
+  return { stores, listings, orders, conversations, revisions, loading, loadError, connected, oauthProcessing, oauthError, refresh, syncStore, disconnectStore, updateListing, endListing, removeListingLocal, publishListing, fetchAmazonProduct, bulkRuns, createBulkRun, processBulkRun, deleteBulkRun, linkExistingListings, syncAllEbayListings, updateOrderNotes, setActiveStore }
 }

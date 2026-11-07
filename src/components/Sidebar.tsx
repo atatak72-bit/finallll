@@ -28,7 +28,8 @@ const accountItems = [
 export default function Sidebar() {
   const [storeOpen, setStoreOpen] = useState(false)
   const [connectOpen, setConnectOpen] = useState(false)
-  const { stores, refresh } = useStoreData()
+  const { stores, refresh, setActiveStore } = useStoreData()
+  const [switchError, setSwitchError] = useState<string | null>(null)
   const activeStore = stores.find(s => s.active) || stores[0]
 
   return (
@@ -60,6 +61,12 @@ export default function Sidebar() {
               {stores.map(s => (
                 <div
                   key={s.id}
+                  onClick={() => {
+                    setStoreOpen(false)
+                    if (s.id === activeStore?.id) return
+                    setSwitchError(null)
+                    setActiveStore(s.id).catch(err => setSwitchError(err instanceof Error ? err.message : 'Mağaza değiştirilemedi'))
+                  }}
                   className={cn(
                     'flex items-center gap-2 px-3 py-2 text-sm hover:bg-slate-50 cursor-pointer rounded-lg',
                     s.id === activeStore?.id && 'bg-brand-50 text-brand-700',
@@ -76,6 +83,7 @@ export default function Sidebar() {
               </div>
             </div>
           )}
+          {switchError && <p className="mt-2 text-xs text-red-600">{switchError}</p>}
         </div>
 
         {/* Nav */}
